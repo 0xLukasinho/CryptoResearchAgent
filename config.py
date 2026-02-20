@@ -5,27 +5,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # API Configuration - Load from environment variables
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 SUPADATA_API_KEY = os.environ.get("SUPADATA_API_KEY", "")
 CLOUDCONVERT_API_KEY = os.environ.get("CLOUDCONVERT_API_KEY", "")  # Added CloudConvert API key
 
-# Set environment variables
-os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-
 # Anthropic API Configuration
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # Recommend using environment variable for security
-ANTHROPIC_MODEL = "claude-3-5-sonnet-20241022"  # Update this as newer models are released
-ANTHROPIC_TEST_MODEL = "claude-3-haiku-20240307"  # Cheaper model for test mode
 
-# Specific model for fact checking (optimized for cost)
-FACT_CHECKING_MODEL = "gpt-4o-mini"  # More cost-effective model for fact checking
+# Claude model constants — change these to upgrade all agents at once
+CLAUDE_FAST_MODEL = "claude-haiku-4-5-20251001"    # Cost-efficient: coordination, analysis, search
+CLAUDE_QUALITY_MODEL = "claude-sonnet-4-6"          # High quality: writing, outlines, style
 
-# Model settings
-MODEL = "gpt-4o-mini"
+# Backward compatibility aliases
+ANTHROPIC_MODEL = CLAUDE_QUALITY_MODEL
+ANTHROPIC_TEST_MODEL = CLAUDE_FAST_MODEL
 
 # Outline Generation Models
-OUTLINE_MODEL = ANTHROPIC_MODEL  # Use Claude 3.5 Sonnet for standard outline generation
-OUTLINE_TEST_MODEL = ANTHROPIC_TEST_MODEL  # Use Claude 3 Haiku for test mode outline generation
+OUTLINE_MODEL = CLAUDE_QUALITY_MODEL  # Use Claude 3.5 Sonnet for standard outline generation
+OUTLINE_TEST_MODEL = CLAUDE_FAST_MODEL  # Use Claude 3 Haiku for test mode outline generation
 
 # Outline Generation Settings
 OUTLINE_FILE_NAME = "research_outline.md"
@@ -60,4 +56,4 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
 YOUTUBE_API_MAX_RESULTS_PER_PAGE = 50  # Maximum results per API request
 
-# ... rest of the file remains unchanged ... 
+# ... rest of the file remains unchanged ...
