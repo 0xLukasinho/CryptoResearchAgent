@@ -1,12 +1,14 @@
-from openai import OpenAI
 import sys
 import os
 sys.path.append('..')
-from config import OPENAI_API_KEY, OUTLINE_MODEL, OUTLINE_TEST_MODEL
+from config import CLAUDE_QUALITY_MODEL, CLAUDE_FAST_MODEL
 import json
 import re
 import tiktoken
 from agents.anthropic_client import AnthropicClient
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 class OutlineGeneratorAgent:
     """Agent for generating research article outlines"""
@@ -15,7 +17,7 @@ class OutlineGeneratorAgent:
         # Initialize the Anthropic client instead of OpenAI
         self.test_mode = test_mode
         self.anthropic_client = AnthropicClient(test_mode=self.test_mode)
-        self.model = OUTLINE_TEST_MODEL if test_mode else OUTLINE_MODEL
+        self.model = CLAUDE_FAST_MODEL if test_mode else CLAUDE_QUALITY_MODEL
         
         # We don't need tiktoken encoding for Claude models
         
@@ -35,7 +37,7 @@ class OutlineGeneratorAgent:
         Returns:
             A string containing the markdown research outline
         """
-        print(f"\n[OUTLINE] Generating research article outline for '{query}'...")
+        logger.info(f"\n[OUTLINE] Generating research article outline for '{query}'...")
         
         # Combine article and video results into a single research results structure
         research_results = {
@@ -72,20 +74,21 @@ class OutlineGeneratorAgent:
 {user_content_text if user_content_text else "No user content provided."}
 """
         
-        print(f"Generating research article outline using {self.model}...")
+        logger.info(f"Generating research article outline using {self.model}...")
         try:
             # Use the Anthropic client to generate the outline
             outline_content = self.anthropic_client.generate_content(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
-                max_tokens=4000
+                max_tokens=4000,
+                model_override=self.model
             )
             
             # Return the outline content
             return outline_content
             
         except Exception as e:
-            print(f"Error generating outline: {e}")
+            logger.error(f"Error generating outline: {e}")
             return f"# Research Outline\n\nError generating outline: {e}"
     
     def _format_research_results(self, research_results):
@@ -328,7 +331,7 @@ This specific formatting (not the exact number of sections or subsections) is re
         Returns:
             str: Revised outline content
         """
-        print(f"\n[OUTLINE] Revising research article outline based on feedback...")
+        logger.info(f"\n[OUTLINE] Revising research article outline based on feedback...")
         
         # Format content for the prompt
         formatted_results = self._format_research_results({
@@ -443,13 +446,14 @@ Return only the revised outline content. Do not include explanations or comments
             revised_outline = self.anthropic_client.generate_content(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
-                max_tokens=4000
+                max_tokens=4000,
+                model_override=self.model
             )
             
             return revised_outline
             
         except Exception as e:
-            print(f"Error revising outline: {e}")
+            logger.error(f"Error revising outline: {e}")
             return current_outline
     
     def save_outline(self, outline_content, output_dir, outline_filename="research_outline.md"):
@@ -469,8 +473,8 @@ Return only the revised outline content. Do not include explanations or comments
         try:
             with open(outline_path, 'w', encoding='utf-8') as f:
                 f.write(outline_content)
-            print(f"Research outline saved to {outline_path}")
+            logger.info(f"Research outline saved to {outline_path}")
             return outline_path
         except Exception as e:
-            print(f"Error saving outline: {e}")
+            logger.error(f"Error saving outline: {e}")
             return None 
