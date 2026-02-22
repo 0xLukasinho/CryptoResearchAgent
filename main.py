@@ -25,6 +25,8 @@ from agents.fact_checker import FactCheckerAgent
 from agents.feedback_processor import FeedbackProcessor
 from agents.outline_feedback import OutlineFeedbackProcessor
 from agents.cloud_convert import CloudConvertClient
+from utils.logger import get_logger
+logger = get_logger("main")
 
 def get_unique_directory_name(base_path):
     """
@@ -434,14 +436,18 @@ def main():
             
             # Get raw style materials
             style_materials = style_learning.get_raw_style_materials()
-            
-            # Verify style samples are correctly loaded
-            if style_materials and 'samples' in style_materials:
-                print(f"[MAIN] Verifying style samples: {len(style_materials['samples'])} samples loaded")
-                for sample in style_materials['samples']:
-                    print(f"[MAIN] Sample file: {sample.get('filename', 'Unknown')}, size: {len(sample.get('content', ''))} chars")
-            else:
-                print("[MAIN] Warning: No style samples were loaded")
+
+            # Generate structured style card (used in every generation and revision call)
+            print("[MAIN] Generating style card from writing samples...")
+            style_card = style_learning.generate_style_card(style_materials)
+
+            # Save style card for inspection
+            style_card_path = os.path.join(query_output_dir, "style_card.json")
+            with open(style_card_path, 'w', encoding='utf-8') as f:
+                json.dump(style_card, f, indent=2)
+            print(f"[MAIN] Style card saved to {style_card_path}")
+
+            style_card_str = style_learning.format_style_card_for_prompt(style_card)
             
             # Initialize article writer
             article_writer = ArticleWriterAgent(anthropic_client)
@@ -452,11 +458,18 @@ def main():
             # Initialize feedback processor
             feedback_processor = FeedbackProcessor()
             
-            # Initialize article with title from query
-            article_file = article_writer.initialize_article(query, query_output_dir)
-            print(f"[ARTICLE WRITER] Created article file: {article_file}")
-            
-            # Track the full article content for context
+            # Initialize stateful article conversation with style card + outline + research context
+            research_summary = final_report if api_content_found else ""
+            article_file = article_writer.start_article(
+                title=query,
+                query_output_dir=query_output_dir,
+                style_card_str=style_card_str,
+                outline=current_outline_content,
+                research_summary=research_summary
+            )
+            print(f"[ARTICLE WRITER] Article conversation initialized: {article_file}")
+
+            # Track article content for manual edit detection
             full_article_content = article_writer.read_current_article()
             
             # Process each section
@@ -476,19 +489,28 @@ def main():
                     user_content_only=not api_content_found  # Pass flag to indicate only user content is available
                 )
                 
-                # Generate and fact-check the section
-                section_content = article_writer.generate_and_check_section(
+                # Generate section using stateful conversation (style and prior sections always in context)
+                section_content = article_writer.write_section(
                     section_info=section,
-                    research_data=section_sources,
-                    style_materials=style_materials,
-                    fact_checker=fact_checker,
-                    previous_content=full_article_content
+                    relevant_sources=section_sources
                 )
-                
-                # Append to article file
-                article_writer.append_section(section_content)
-                
-                # Update full article content
+
+                # Fact-check the generated section
+                check_results = fact_checker.check_section(
+                    section_content=section_content,
+                    sources=section_sources
+                )
+                if not check_results.get('accurate', False):
+                    print(f"[FACT CHECK] Applying factual corrections to section: {section_title}")
+                    section_content = fact_checker.suggest_corrections(
+                        section_content=section_content,
+                        check_results=check_results
+                    )
+                    if article_writer.accepted_sections:
+                        article_writer.accepted_sections[-1]['content'] = section_content
+                        article_writer.accept_revision(section_title, section_content)
+
+                # Update content tracker for manual edit detection
                 full_article_content = article_writer.read_current_article()
                 
                 # Present the section to the user for feedback
@@ -521,90 +543,24 @@ def main():
                     
                     # User wants the AI to revise the section
                     elif feedback['action'] == 'revise':
-                        # Add current content to section info for reference
                         section_with_content = section.copy()
                         section_with_content['current_content'] = section_content
-                        
-                        # Generate revised content
+
                         revised_content = feedback_processor.process_revision_request(
                             feedback=feedback,
                             article_writer=article_writer,
                             section_info=section_with_content,
                             research_data=section_sources,
                             style_materials=style_materials,
-                            fact_checker=fact_checker,
-                            previous_content=full_article_content
+                            fact_checker=fact_checker
                         )
-                        
-                        # Replace section in the article file
-                        # Read current article content
-                        current_article_lines = full_article_content.split('\n')
-                        
-                        # Print debug info
-                        print(f"\n[FEEDBACK] DEBUG: Searching for section '{section_title}'")
-                        
-                        # Use the new improved section boundary detection
-                        section_start, section_end = feedback_processor.find_section_boundaries(
-                            article_content=full_article_content, 
-                            section_title=section_title
-                        )
-                        
-                        # Debug: Show first few lines of content for troubleshooting
-                        feedback_processor.log_debug("First few lines of article:")
-                        for i, line in enumerate(current_article_lines[:min(10, len(current_article_lines))]):
-                            feedback_processor.log_debug(f"Line {i+1}: {line}")
-                        
-                        # If we found the section
-                        if section_start >= 0 and section_end >= 0:
-                            # Ensure the revised content has the proper section heading
-                            any_section_pattern = re.compile(r'^\s*##\s+')
-                            if not any_section_pattern.match(revised_content):
-                                # Add the section heading if it's missing
-                                revised_content = f"## {feedback_processor.normalize_section_title(section_title, remove_numbers=True)}\n\n{revised_content}"
-                                feedback_processor.log_debug("Added section heading to revised content")
-                                
-                            # Create new article content
-                            new_content = '\n'.join(current_article_lines[:section_start])
-                            new_content += '\n' + revised_content + '\n'
-                            if section_end < len(current_article_lines) - 1:
-                                new_content += '\n' + '\n'.join(current_article_lines[section_end+1:])
-                            
-                            # Write to file
-                            with open(article_file, 'w', encoding='utf-8') as f:
-                                f.write(new_content)
-                            
-                            # Update full article content
-                            full_article_content = new_content
-                            section_content = revised_content
-                            
-                            print(f"[FEEDBACK] Section revised and updated in the article.")
-                            
-                            # Present the revised section for feedback again
-                            feedback_processor.present_section(section_title, article_file)
-                        else:
-                            print(f"[FEEDBACK] Error: Could not locate section boundaries in the article.")
-                            feedback_processor.log_debug(f"Section boundaries - start: {section_start}, end: {section_end}")
-                            
-                            # Provide recovery options
-                            print("\n[FEEDBACK] Recovery options:")
-                            print("1. Type 'accept' to skip this section and move to the next one")
-                            print("2. Edit the file directly to make your changes, then type 'edited'")
-                            print("3. Type 'full' to replace the entire article with the revised content (use with caution)")
-                            
-                            recovery_choice = input("[FEEDBACK] Recovery option > ").strip().lower()
-                            
-                            if recovery_choice == 'full':
-                                # Replace entire article content
-                                feedback_processor.log_debug("Using full content replacement as recovery")
-                                with open(article_file, 'w', encoding='utf-8') as f:
-                                    f.write(revised_content)
-                                
-                                # Update tracking variables
-                                full_article_content = revised_content
-                                section_content = revised_content
-                                
-                                print(f"[FEEDBACK] Entire article replaced with revised content.")
-                                feedback_processor.present_section(section_title, article_file)
+
+                        # Accept revision — rewrites article file cleanly from accepted_sections list
+                        article_writer.accept_revision(section_title, revised_content)
+                        section_content = revised_content
+                        full_article_content = article_writer.read_current_article()
+                        print(f"[FEEDBACK] Section '{section_title}' revised and updated.")
+                        feedback_processor.present_section(section_title, article_file)
             
             # Article completion
             print("\n[ARTICLE WRITER] 🎉 Article generation complete!")
