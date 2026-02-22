@@ -37,3 +37,35 @@ def test_process_revision_calls_article_writer_revise_section():
         current_content='old content'
     )
     assert result == "## Section\n\nRevised content."
+
+
+def test_check_for_file_edits_returns_true_when_content_changed():
+    import tempfile
+    import os
+    from agents.feedback_processor import FeedbackProcessor
+    processor = FeedbackProcessor()
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+        f.write("new content")
+        tmp_path = f.name
+    try:
+        has_changes, content = processor.check_for_file_edits(tmp_path, "old content")
+        assert has_changes is True
+        assert content == "new content"
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_check_for_file_edits_returns_false_when_content_unchanged():
+    import tempfile
+    import os
+    from agents.feedback_processor import FeedbackProcessor
+    processor = FeedbackProcessor()
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+        f.write("same content")
+        tmp_path = f.name
+    try:
+        has_changes, content = processor.check_for_file_edits(tmp_path, "same content")
+        assert has_changes is False
+        assert content == "same content"
+    finally:
+        os.unlink(tmp_path)

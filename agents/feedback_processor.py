@@ -1,5 +1,4 @@
 # agents/feedback_processor.py
-import os
 import sys
 sys.path.append('..')
 from utils.logger import get_logger
@@ -64,7 +63,7 @@ class FeedbackProcessor:
         Returns:
             str: Revised section content
         """
-        revision_instructions = feedback.get('details', '')
+        revision_instructions = feedback.get('details') or ''
         current_content = section_info.get('current_content', '')
         section_title = section_info['title']
 
