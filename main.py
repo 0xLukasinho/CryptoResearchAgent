@@ -3,7 +3,6 @@ import sys
 import pandas as pd
 import json
 import os
-import re
 import traceback
 from config import CSV_PATH, YOUTUBE_CSV_PATH, OUTPUT_DIR, OUTLINE_FILE_NAME, CLOUDCONVERT_API_KEY
 from utils.csv_handler import load_substack_data
@@ -336,12 +335,6 @@ def main():
         else:
             print("Failed to save research outline.")
             
-        # Skip article writing in search mode
-        if search_mode:
-            print("\n[SEARCH MODE] Search and analysis complete. Skipping user content and outline generation.")
-            print(f"\nResults saved to {filename}")
-            sys.exit(0)
-        
         # Initialize article writer components
         try:
             # Set up necessary directories
@@ -438,14 +431,14 @@ def main():
             style_materials = style_learning.get_raw_style_materials()
 
             # Generate structured style card (used in every generation and revision call)
-            print("[MAIN] Generating style card from writing samples...")
+            logger.info("Generating style card from writing samples...")
             style_card = style_learning.generate_style_card(style_materials)
 
             # Save style card for inspection
             style_card_path = os.path.join(query_output_dir, "style_card.json")
             with open(style_card_path, 'w', encoding='utf-8') as f:
                 json.dump(style_card, f, indent=2)
-            print(f"[MAIN] Style card saved to {style_card_path}")
+            logger.info(f"Style card saved to {style_card_path}")
 
             style_card_str = style_learning.format_style_card_for_prompt(style_card)
             
@@ -467,7 +460,7 @@ def main():
                 outline=current_outline_content,
                 research_summary=research_summary
             )
-            print(f"[ARTICLE WRITER] Article conversation initialized: {article_file}")
+            logger.info(f"Article conversation initialized: {article_file}")
 
             # Track article content for manual edit detection
             full_article_content = article_writer.read_current_article()
@@ -478,7 +471,7 @@ def main():
             # Loop through each section
             for i, section in enumerate(sections):
                 section_title = section['title']
-                print(f"\n[ARTICLE WRITER] Processing section {i+1}/{len(sections)}: {section_title}")
+                logger.info(f"Processing section {i+1}/{len(sections)}: {section_title}")
                 
                 # Gather relevant sources for this section
                 section_sources = article_writer.retrieve_relevant_sources(
@@ -509,6 +502,10 @@ def main():
                     if article_writer.accepted_sections:
                         article_writer.accepted_sections[-1]['content'] = section_content
                         article_writer.accept_revision(section_title, section_content)
+                    # Keep conversation history consistent with the corrected version
+                    if (article_writer.conversation_history and
+                            article_writer.conversation_history[-1]['role'] == 'assistant'):
+                        article_writer.conversation_history[-1]['content'] = section_content
 
                 # Update content tracker for manual edit detection
                 full_article_content = article_writer.read_current_article()
