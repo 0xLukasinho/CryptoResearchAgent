@@ -88,13 +88,17 @@ Supporting the agents are specialized utility modules:
 - **User Content Manager**: Integrates user-provided research materials
 - **Directory Setup**: Creates and manages file/folder structures
 - **Tweet Extractor**: Retrieves and processes content from Twitter/X
+- **Logger**: Centralized logging with rotating file output (`output/logs/agent.log`) and console output
+- **Token Utils**: Token-accurate content truncation using tiktoken
+- **Retry**: Exponential backoff decorator for Anthropic API rate limit and overload errors
 
 ### AI Services Integration
 
-The system leverages multiple AI services:
+The system leverages these AI services:
 
-- **OpenAI API**: Powers several agents including the Coordinator
-- **Anthropic API**: Drives the Outline Generator and Article Writer using Claude models
+- **Anthropic API**: Powers all 12 agents using Claude models
+  - `claude-haiku-4-5-20251001` — cost-efficient tasks: coordination, analysis, search, summarization, fact checking
+  - `claude-sonnet-4-6` — quality-critical tasks: article writing, style card generation, outline generation
 - **SupaData API**: Retrieves YouTube video transcripts
 - **CloudConvert API**: Handles document format conversions
 
@@ -103,8 +107,7 @@ The system leverages multiple AI services:
 ### Prerequisites
 
 - Python 3.7 or higher
-- OpenAI API key
-- Anthropic API key (for Claude models)
+- Anthropic API key
 - SupaData API key (for YouTube transcript retrieval)
 - CloudConvert API key (for document processing)
 
@@ -210,9 +213,9 @@ python main.py "Bitcoin ETF inflows"
 
 ### Writing Style Personalization
 
-The system learns your writing style to generate content that matches your voice:
+The system learns your writing style and embeds it in every section it writes and revises:
 
-1. **Style Sample Collection**: 
+1. **Style Sample Collection**:
    - Place writing samples in `input/writing_samples/` directory
    - Supports plain text (.txt) and Word documents (.docx)
    - Add multiple samples for better style learning
@@ -222,11 +225,17 @@ The system learns your writing style to generate content that matches your voice
    - Define tone, structure, terminology preferences
    - Set specific stylistic guidelines
 
-3. **Style Analysis**: The system analyzes these materials to capture:
-   - Voice and personality characteristics
+3. **Structured Style Card**: The Style Learning Agent generates a JSON style card capturing:
+   - Tone and personality characteristics
    - Sentence structure patterns
-   - Vocabulary preferences and terminology usage
-   - Formatting conventions
+   - Vocabulary to use and avoid (word lists)
+   - Paragraph structure conventions
+   - Characteristic transition phrases
+   - Verbatim example excerpts from your writing
+
+   The style card is saved to `output/[query]/style_card.json` and embedded directly in the article writer's system prompt for every generation and revision call.
+
+4. **Stateful Conversation**: The Article Writer maintains a single conversation thread for the entire article. Each section and revision is added to the same thread, so the model always has full context of what it previously wrote — preventing style drift across sections and on revision.
 
 ### Fact Checking System
 
@@ -294,7 +303,7 @@ https://twitter.com/haydenzadams/status/1910816676628545930
 
 The system generates these output files in a query-specific directory:
 
-1. **Research Summary** (`crypto_research_[query].md`)
+1. **Research Summary** (`research_results.md`)
    - Analyzed content from all sources
    - Relevance scoring and key insights
 
@@ -302,11 +311,21 @@ The system generates these output files in a query-specific directory:
    - Structured outline incorporating all findings
    - Section and subsection organization
 
-3. **Article** (`article.md`)
+3. **Style Card** (`style_card.json`)
+   - Structured JSON capturing your writing style
+   - Embedded in every article generation and revision call
+
+4. **Article** (`article.md`)
    - Complete, publication-ready article
    - Written in your personal style
 
-4. **Tweet Content** (in `tweets/` subdirectory)
+5. **Word Document** (`article.docx`)
+   - Microsoft Word version of the article (via CloudConvert)
+
+6. **Agent Log** (`output/logs/agent.log`)
+   - Rotating log file with debug-level output from all agents
+
+7. **Tweet Content** (in `tweets/` subdirectory)
    - Individual files containing extracted tweets
 
 ## Usage Examples
@@ -333,9 +352,11 @@ python main.py "Crypto regulations" --max-age 30
 
 ## Troubleshooting
 
-- **API Key Issues**: Ensure all API keys are correctly set in your .env file
-- **Content Database Problems**: Verify Substacks.csv and YouTubes.csv are properly formatted
+- **API Key Issues**: Ensure `ANTHROPIC_API_KEY` and other keys are correctly set in your `.env` file
+- **Content Database Problems**: Verify `Substacks.csv` and `YouTubes.csv` are properly formatted
 - **Style Learning Failures**: Check that writing samples are in the correct directory and format
-- **Memory Limitations**: For very large research queries, consider using test mode first
+- **Rate Limit Errors**: The system automatically retries with exponential backoff — persistent failures indicate quota exhaustion
+- **Long Articles**: For articles with many sections, the stateful conversation grows with each section; if you hit context limits, reduce the number of outline sections
+- **Log Inspection**: Check `output/logs/agent.log` for detailed debug output from all agents
 
 If you encounter persistent issues, check the console output for specific error messages or review the project documentation for updates.
