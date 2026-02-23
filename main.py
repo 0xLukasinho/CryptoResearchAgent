@@ -115,18 +115,18 @@ def main():
         print(f"Required terms that MUST appear in content: {required_terms}")
         
         # Debug: Verify the required_terms format and content
-        print(f"[DEBUG] Required terms type: {type(required_terms)}")
-        print(f"[DEBUG] Required terms value: {required_terms}")
-        
+        logger.debug(f"Required terms type: {type(required_terms)}")
+        logger.debug(f"Required terms value: {required_terms}")
+
         # Ensure required_terms is a list of strings
         if required_terms and not isinstance(required_terms, list):
-            print(f"[DEBUG] Converting required_terms to list: {required_terms}")
+            logger.debug(f"Converting required_terms to list: {required_terms}")
             required_terms = [str(required_terms)]
         elif required_terms:
             # Ensure all items are strings and non-empty
             required_terms = [str(term) for term in required_terms if term]
-            print(f"[DEBUG] Sanitized required_terms: {required_terms}")
-    except:
+            logger.debug(f"Sanitized required_terms: {required_terms}")
+    except (json.JSONDecodeError, ValueError, KeyError):
         print("Warning: Unable to parse search plan as JSON. Proceeding without required terms.")
         required_terms = []
         search_plan = search_plan_json
@@ -214,8 +214,8 @@ def main():
         print("\n[YOUTUBE] Starting YouTube search...")
         
         # Debug log required terms before YouTube search
-        print(f"[YOUTUBE SEARCH] DEBUG: Required terms before YouTube search: {required_terms}")
-        print(f"[YOUTUBE SEARCH] DEBUG: Required terms type: {type(required_terms)}")
+        logger.debug(f"Required terms before YouTube search: {required_terms}")
+        logger.debug(f"Required terms type: {type(required_terms)}")
         
         # Load YouTube data
         youtube_agent = YouTubeAgent()
@@ -234,22 +234,18 @@ def main():
             )
             
             # Debug log video results
-            print(f"[YOUTUBE SEARCH] DEBUG: Received {len(video_results)} videos from YouTube search")
-            for i, video in enumerate(video_results[:3]):  # Show first 3 videos
-                print(f"[YOUTUBE SEARCH] DEBUG: Video {i+1}: {video.get('title', 'No title')}")
-                # Print video properties to help diagnose relevance issues
-                print(f"   - Relevance Score: {video.get('relevance_score', 'Not scored')}")
-                print(f"   - Has Transcript: {'Yes' if video.get('transcript_text') else 'No'}")
+            logger.debug(f"Received {len(video_results)} videos from YouTube search")
+            for i, video in enumerate(video_results[:3]):
+                logger.debug(f"Video {i+1}: {video.get('title', 'No title')}")
+                logger.debug(f"  Relevance Score: {video.get('relevance_score', 'Not scored')}")
+                logger.debug(f"  Has Transcript: {'Yes' if video.get('transcript_text') else 'No'}")
                 if required_terms:
-                    # Check if title/description contains required terms
                     content = f"{video.get('title', '')} {video.get('description', '')}"
                     has_required_terms = all(term.lower() in content.lower() for term in required_terms)
-                    print(f"   - Contains All Required Terms: {'Yes' if has_required_terms else 'No'}")
-                    
-                    # If transcript is available, check that too
+                    logger.debug(f"  Contains All Required Terms: {'Yes' if has_required_terms else 'No'}")
                     if video.get('transcript_text'):
                         transcript_has_terms = all(term.lower() in video.get('transcript_text', '').lower() for term in required_terms)
-                        print(f"   - Transcript Contains All Required Terms: {'Yes' if transcript_has_terms else 'No'}")
+                        logger.debug(f"  Transcript Contains All Required Terms: {'Yes' if transcript_has_terms else 'No'}")
     
     # Step 4: Generate final report
     api_content_found = bool(article_results or video_results)
@@ -271,6 +267,7 @@ def main():
             print("\n[PROCEEDING] Continuing with user-provided content only.")
     
     # Only run summarization if API content was found
+    final_report = ""  # default; overwritten below if API content was found
     if api_content_found:
         # Initialize summarization agent
         summarization = SummarizationAgent()

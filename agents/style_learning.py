@@ -82,7 +82,7 @@ class StyleLearningAgent:
             
             return '\n'.join(content)
         except Exception as e:
-            self.logger.info(f"Error extracting text from {file_path}: {e}")
+            self.logger.error(f"Error extracting text from {file_path}: {e}")
             return f"[Error extracting content from {os.path.basename(file_path)}: {str(e)}]"
     
     def load_instructions(self):
@@ -134,7 +134,7 @@ class StyleLearningAgent:
                             'content': content
                         })
             except Exception as e:
-                self.logger.info(f"Error reading sample file {file_path}: {e}")
+                self.logger.error(f"Error reading sample file {file_path}: {e}")
         
         # Load instructions
         instructions_content = self.load_instructions()
