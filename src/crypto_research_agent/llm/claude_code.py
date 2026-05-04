@@ -6,11 +6,11 @@ from typing import Any
 
 from .types import ClaudeResponse
 from .errors import ClaudeCodeError, AuthMissing, QuotaExceeded, TransientError
+from ._json import parse_json_loose
 
 
 QUOTA_PATTERNS = re.compile(r"(usage limit|quota exceeded|rate limit)", re.IGNORECASE)
 AUTH_PATTERNS = re.compile(r"(not authenticated|setup-token|unauthorized)", re.IGNORECASE)
-JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class ClaudeCodeBackend:
@@ -94,21 +94,7 @@ class ClaudeCodeBackend:
             "No explanation, no markdown fences, no commentary. Just the raw JSON object."
         )
         response = self.complete(prompt=prompt, model=model, system_prompt=strict)
-        return self._parse_json_loose(response.text)
-
-    @staticmethod
-    def _parse_json_loose(text: str) -> dict:
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        match = JSON_OBJECT_RE.search(text)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        return {}
+        return parse_json_loose(response.text)
 
     def _build_command(self, *, model: str, system_prompt: str,
                        resume_session: str | None, prompt: str) -> list[str]:
