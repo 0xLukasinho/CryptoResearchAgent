@@ -71,12 +71,22 @@ class ClaudeCodeBackend:
             try:
                 data = json.loads(result.stdout)
                 if data.get("is_error"):
-                    msg = data.get("result", "")
+                    msg = data.get("result") or ""
                     if QUOTA_PATTERNS.search(msg):
                         raise QuotaExceeded(f"Subscription quota exhausted: {msg}")
+                    if AUTH_PATTERNS.search(msg):
+                        raise AuthMissing(
+                            f"Claude Code is not authenticated. "
+                            f"Run `claude setup-token` or `claude login`. ({msg})"
+                        )
                     raise ClaudeCodeError(f"Claude returned error: {msg}")
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                if result.returncode == 0:
+                    raise ClaudeCodeError(
+                        f"`claude -p` returned malformed JSON despite exit 0: "
+                        f"{result.stdout[:200]!r}"
+                    ) from e
+                # else: fall through to returncode-based classification below
         if result.returncode == 0:
             return
         # Non-zero exit

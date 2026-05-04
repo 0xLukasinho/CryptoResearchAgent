@@ -35,6 +35,22 @@ def test_quota_exceeded_detected_from_json_is_error():
             backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
 
 
+def test_json_is_error_non_quota_raises_claude_code_error():
+    backend = ClaudeCodeBackend()
+    body = json.dumps({"is_error": True, "result": "Internal model failure"})
+    with patch("subprocess.run", return_value=_mock_run(stdout=body, returncode=0)):
+        with pytest.raises(ClaudeCodeError):
+            backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
+
+
+def test_json_is_error_auth_message_raises_auth_missing():
+    backend = ClaudeCodeBackend()
+    body = json.dumps({"is_error": True, "result": "Error: not authenticated"})
+    with patch("subprocess.run", return_value=_mock_run(stdout=body, returncode=0)):
+        with pytest.raises(AuthMissing):
+            backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
+
+
 def test_auth_missing_detected():
     backend = ClaudeCodeBackend()
     with patch("subprocess.run",
