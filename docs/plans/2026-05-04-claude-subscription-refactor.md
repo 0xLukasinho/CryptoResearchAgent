@@ -2606,3 +2606,3065 @@ git commit -m "feat(services): YouTubeService with channel videos + transcripts"
 ```
 
 ---
+
+### Task D6: `services/docx_export.py` — port `CloudConvertClient`
+
+**Files:**
+- Create: `src/crypto_research_agent/services/docx_export.py`
+- Create: `tests/services/test_docx_export.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/services/test_docx_export.py
+import responses
+from pathlib import Path
+
+from crypto_research_agent.services.docx_export import DocxExporter
+
+
+@responses.activate
+def test_convert_markdown_to_docx_full_lifecycle(tmp_path):
+    md = tmp_path / "article.md"
+    md.write_text("# Test\nbody", encoding="utf-8")
+
+    responses.add(
+        responses.POST, "https://api.cloudconvert.com/v2/jobs", status=201,
+        json={"data": {
+            "id": "job-1",
+            "tasks": [{
+                "name": "import-my-file",
+                "result": {"form": {"url": "https://upload.example.com",
+                                     "parameters": {}}},
+            }],
+        }},
+    )
+    responses.add(
+        responses.POST, "https://upload.example.com", status=201, body="",
+    )
+    responses.add(
+        responses.GET, "https://api.cloudconvert.com/v2/jobs/job-1", status=200,
+        json={"data": {
+            "id": "job-1", "status": "finished",
+            "tasks": [{
+                "name": "export-my-file",
+                "result": {"files": [{"url": "https://download.example.com/file.docx"}]},
+            }],
+        }},
+    )
+    responses.add(
+        responses.GET, "https://download.example.com/file.docx", status=200,
+        body=b"PK\x03\x04docx-bytes",
+    )
+
+    exp = DocxExporter(api_key="ck-test")
+    out = exp.convert_markdown_to_docx(md)
+    assert out == md.with_suffix(".docx")
+    assert out.exists() and out.read_bytes().startswith(b"PK")
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/services/docx_export.py
+import time
+from pathlib import Path
+import requests
+
+from ..config import CLOUDCONVERT_BASE_URL
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class DocxExporter:
+    """Convert markdown to DOCX via CloudConvert."""
+
+    def __init__(self, *, api_key: str, base_url: str = CLOUDCONVERT_BASE_URL):
+        self._api_key = api_key
+        self._base = base_url
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def convert_markdown_to_docx(self, input_path: Path | str) -> Path:
+        in_path = Path(input_path)
+        if not in_path.exists():
+            raise FileNotFoundError(input_path)
+        out_path = in_path.with_suffix(".docx")
+
+        job = self._create_job()
+        upload_task = next(t for t in job["tasks"] if t["name"] == "import-my-file")
+        upload_url = upload_task["result"]["form"]["url"]
+        upload_params = upload_task["result"]["form"]["parameters"]
+
+        with in_path.open("rb") as fh:
+            r = requests.post(upload_url, data=upload_params, files={"file": fh})
+        if r.status_code not in (200, 201):
+            raise RuntimeError(f"Upload failed: {r.text}")
+
+        completed = self._wait_finished(job["id"])
+        export_task = next(t for t in completed["tasks"] if t["name"] == "export-my-file")
+        download_url = export_task["result"]["files"][0]["url"]
+        self._download(download_url, out_path)
+        logger.info("DOCX written to %s", out_path)
+        return out_path
+
+    def _create_job(self) -> dict:
+        payload = {
+            "tasks": {
+                "import-my-file": {"operation": "import/upload"},
+                "convert-my-file": {
+                    "operation": "convert", "input": "import-my-file",
+                    "output_format": "docx", "engine": "pandoc",
+                },
+                "export-my-file": {"operation": "export/url", "input": "convert-my-file"},
+            }
+        }
+        r = requests.post(f"{self._base}/jobs", headers=self._headers, json=payload)
+        r.raise_for_status()
+        return r.json()["data"]
+
+    def _wait_finished(self, job_id: str, *, timeout: int = 300) -> dict:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            r = requests.get(f"{self._base}/jobs/{job_id}", headers=self._headers)
+            r.raise_for_status()
+            data = r.json()["data"]
+            if data["status"] == "finished":
+                return data
+            if data["status"] in ("error", "canceled"):
+                raise RuntimeError(f"DOCX conversion {data['status']}")
+            time.sleep(2)
+        raise TimeoutError(f"DOCX conversion timed out after {timeout}s")
+
+    def _download(self, url: str, out_path: Path) -> None:
+        r = requests.get(url, stream=True)
+        r.raise_for_status()
+        with out_path.open("wb") as fh:
+            for chunk in r.iter_content(chunk_size=8192):
+                fh.write(chunk)
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/services/docx_export.py tests/services/test_docx_export.py
+git commit -m "feat(services): DocxExporter with full CloudConvert lifecycle"
+```
+
+---
+
+### Task D7: `services/tweet_extractor.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/services/tweet_extractor.py`
+- Create: `tests/services/test_tweet_extractor.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/services/test_tweet_extractor.py
+from unittest.mock import patch, MagicMock
+from pathlib import Path
+
+from crypto_research_agent.services.tweet_extractor import TweetExtractor, Tweet
+
+
+def test_extract_returns_tweets_with_files(tmp_path):
+    urls_file = tmp_path / "tweets.txt"
+    urls_file.write_text("https://twitter.com/x/status/1\nhttps://twitter.com/y/status/2\n")
+    fake_page = MagicMock()
+    fake_page.evaluate.side_effect = ["First tweet text", "Second tweet text"]
+    fake_browser = MagicMock()
+    fake_context = MagicMock()
+    fake_context.new_page.return_value = fake_page
+    fake_browser.new_context.return_value = fake_context
+
+    pw_cm = MagicMock()
+    pw_cm.__enter__.return_value = MagicMock(chromium=MagicMock(launch=MagicMock(return_value=fake_browser)))
+    pw_cm.__exit__.return_value = False
+
+    extractor = TweetExtractor()
+    with patch("crypto_research_agent.services.tweet_extractor.sync_playwright", return_value=pw_cm):
+        with patch("time.sleep"):
+            tweets = extractor.extract(urls_file, output_dir=tmp_path)
+    assert len(tweets) == 2
+    assert tweets[0].text == "First tweet text"
+    assert (tmp_path / "tweets" / "tweet_1.txt").exists()
+
+
+def test_missing_file_returns_empty(tmp_path):
+    extractor = TweetExtractor()
+    assert extractor.extract(tmp_path / "missing.txt", output_dir=tmp_path) == []
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/services/tweet_extractor.py
+from dataclasses import dataclass
+import time
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class Tweet:
+    title: str
+    text: str
+    url: str
+    file_path: Path
+
+
+class TweetExtractor:
+    def extract(self, urls_file: Path | str, *, output_dir: Path | str) -> list[Tweet]:
+        urls_file = Path(urls_file)
+        if not urls_file.exists():
+            logger.warning("Tweets file not found: %s", urls_file)
+            return []
+        urls = [u.strip() for u in urls_file.read_text(encoding="utf-8").splitlines() if u.strip()]
+        out_dir = Path(output_dir) / "tweets"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        results: list[Tweet] = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            for i, url in enumerate(urls, start=1):
+                text = self._extract_one(page, url)
+                if not text:
+                    continue
+                file_path = out_dir / f"tweet_{i}.txt"
+                file_path.write_text(text, encoding="utf-8")
+                results.append(Tweet(title=f"Tweet {i}", text=text, url=url, file_path=file_path))
+                time.sleep(1)
+        return results
+
+    def _extract_one(self, page, url: str) -> str | None:
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_selector('[data-testid="tweetText"]', timeout=10000)
+            return page.evaluate(
+                'document.querySelector(\'[data-testid="tweetText"]\')?.textContent ?? null'
+            )
+        except Exception as e:
+            logger.warning("Tweet extraction failed for %s: %s", url, e)
+            return None
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/services/tweet_extractor.py tests/services/test_tweet_extractor.py
+git commit -m "feat(services): TweetExtractor with mockable Playwright wrapper"
+```
+
+---
+
+### Task D8: `services/user_content.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/services/user_content.py`
+- Create: `tests/services/test_user_content.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/services/test_user_content.py
+from unittest.mock import MagicMock
+from pathlib import Path
+
+from crypto_research_agent.services.user_content import UserContentService, UserContent
+
+
+def test_collect_processes_text_files(tmp_path):
+    (tmp_path / "note.txt").write_text("This is a research note about Bitcoin.")
+    analyzer = MagicMock()
+    analyzer.extract_insights.return_value = (["insight 1"], ["Bitcoin"])
+    svc = UserContentService(analyzer=analyzer)
+    items = svc.collect(tmp_path)
+    assert len(items) == 1
+    assert items[0].file_type == "text"
+    assert items[0].title == "note"
+    assert items[0].mentioned_projects == ["Bitcoin"]
+
+
+def test_collect_skips_oversize_files(tmp_path):
+    big = tmp_path / "big.txt"
+    big.write_bytes(b"x" * (2 * 1024 * 1024))  # 2 MB > 1 MB text limit
+    analyzer = MagicMock()
+    svc = UserContentService(analyzer=analyzer)
+    assert svc.collect(tmp_path) == []
+
+
+def test_collect_handles_empty_dir(tmp_path):
+    svc = UserContentService(analyzer=MagicMock())
+    assert svc.collect(tmp_path) == []
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/services/user_content.py
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal, Callable
+import datetime
+
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+FileType = Literal["text", "pdf", "csv", "tweet"]
+
+_MAX_BYTES = {
+    "text": 1 * 1024 * 1024,
+    "pdf": 10 * 1024 * 1024,
+    "csv": 5 * 1024 * 1024,
+}
+
+
+@dataclass
+class UserContent:
+    title: str
+    author: str
+    text: str
+    url: str
+    file_type: FileType
+    key_insights: list[str] = field(default_factory=list)
+    mentioned_projects: list[str] = field(default_factory=list)
+
+
+class UserContentService:
+    """Collects user-supplied files (txt/md/pdf/csv) and runs analyzer for insights."""
+
+    def __init__(self, *, analyzer):
+        self._analyzer = analyzer
+
+    def collect(self, content_dir: Path | str) -> list[UserContent]:
+        content_dir = Path(content_dir)
+        if not content_dir.exists():
+            return []
+        out: list[UserContent] = []
+        for path in sorted(content_dir.iterdir()):
+            if not path.is_file():
+                continue
+            if path.name.lower() == "tweets.txt":
+                continue  # processed separately by TweetExtractor
+            handler = self._dispatch(path)
+            if handler is None:
+                continue
+            try:
+                item = handler(path)
+                if item is not None:
+                    out.append(item)
+            except Exception as e:
+                logger.warning("Failed to process %s: %s", path.name, e)
+        return out
+
+    def _dispatch(self, path: Path) -> Callable[[Path], UserContent | None] | None:
+        suffix = path.suffix.lower()
+        if suffix in (".txt", ".md"):
+            return self._process_text
+        if suffix == ".pdf":
+            return self._process_pdf
+        if suffix == ".csv":
+            return self._process_csv
+        return None
+
+    def _check_size(self, path: Path, file_type: str) -> bool:
+        if path.stat().st_size > _MAX_BYTES[file_type]:
+            logger.warning("Skipping %s: exceeds %d bytes", path.name, _MAX_BYTES[file_type])
+            return False
+        return True
+
+    def _process_text(self, path: Path) -> UserContent | None:
+        if not self._check_size(path, "text"):
+            return None
+        content = path.read_text(encoding="utf-8")
+        if not content.strip():
+            return None
+        insights, projects = self._analyzer.extract_insights(content)
+        return UserContent(
+            title=path.stem, author="User Provided",
+            text=content[:5000], url=f"file://{path}", file_type="text",
+            key_insights=insights, mentioned_projects=projects,
+        )
+
+    def _process_pdf(self, path: Path) -> UserContent | None:
+        if not self._check_size(path, "pdf"):
+            return None
+        import pdfplumber
+        text = ""
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                text += (page.extract_text() or "") + "\n\n"
+        if not text.strip():
+            return None
+        insights, projects = self._analyzer.extract_insights(text)
+        return UserContent(
+            title=path.stem, author="User Provided",
+            text=text[:5000], url=f"file://{path}", file_type="pdf",
+            key_insights=insights, mentioned_projects=projects,
+        )
+
+    def _process_csv(self, path: Path) -> UserContent | None:
+        if not self._check_size(path, "csv"):
+            return None
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = path.read_text(encoding="latin-1")
+        if not content.strip():
+            return None
+        insights, projects = self._analyzer.extract_insights(content[:8000])
+        return UserContent(
+            title=path.stem, author="User Provided",
+            text=f"CSV DATA:\n\n{content[:5000]}", url=f"file://{path}", file_type="csv",
+            key_insights=insights, mentioned_projects=projects,
+        )
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/services/user_content.py tests/services/test_user_content.py
+git commit -m "feat(services): UserContentService with file-type dispatch + size limits"
+```
+
+---
+
+## Phase E — Real Agents
+
+### Task E1: `agents/coordinator.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/agents/coordinator.py`
+- Create: `tests/agents/__init__.py` (empty)
+- Create: `tests/agents/test_coordinator.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/agents/test_coordinator.py
+from unittest.mock import MagicMock
+
+from crypto_research_agent.agents.coordinator import Coordinator, SearchPlan
+
+
+def test_plan_returns_search_plan_with_main_topic_and_terms():
+    backend = MagicMock()
+    backend.complete_json.return_value = {
+        "main_topic": "Bitcoin ETF",
+        "required_terms": ["bitcoin", "etf"],
+    }
+    coord = Coordinator(backend, model="m")
+    plan = coord.plan("Bitcoin ETF inflows")
+    assert isinstance(plan, SearchPlan)
+    assert plan.main_topic == "Bitcoin ETF"
+    assert plan.required_terms == ["bitcoin", "etf"]
+
+
+def test_plan_falls_back_when_llm_returns_garbage():
+    backend = MagicMock()
+    backend.complete_json.return_value = {}
+    coord = Coordinator(backend, model="m")
+    plan = coord.plan("something")
+    assert plan.main_topic == "something"
+    assert plan.required_terms == []
+
+
+def test_plan_filters_invalid_terms():
+    backend = MagicMock()
+    backend.complete_json.return_value = {
+        "main_topic": "x",
+        "required_terms": ["bitcoin", "", None, "etf"],
+    }
+    coord = Coordinator(backend, model="m")
+    plan = coord.plan("q")
+    assert plan.required_terms == ["bitcoin", "etf"]
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/agents/coordinator.py
+from dataclasses import dataclass
+
+
+COORDINATOR_SYSTEM_PROMPT = """You are the Coordinator Agent for a crypto research workflow.
+Analyze the user's research query and respond with valid JSON containing:
+- main_topic: The primary cryptocurrency or blockchain topic
+- required_terms: Terms STRICTLY from the user's query — never add extras not in the query
+"""
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    main_topic: str
+    required_terms: list[str]
+
+
+class Coordinator:
+    def __init__(self, backend, *, model: str):
+        self._backend = backend
+        self._model = model
+
+    def plan(self, query: str) -> SearchPlan:
+        result = self._backend.complete_json(
+            prompt=query, model=self._model,
+            system_prompt=COORDINATOR_SYSTEM_PROMPT,
+        )
+        terms = [
+            str(t).strip() for t in result.get("required_terms", [])
+            if t and isinstance(t, str) and t.strip()
+        ]
+        return SearchPlan(
+            main_topic=result.get("main_topic") or query,
+            required_terms=terms,
+        )
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/agents/coordinator.py tests/agents/test_coordinator.py tests/agents/__init__.py
+git commit -m "feat(agents): Coordinator returns typed SearchPlan"
+```
+
+---
+
+### Task E2: `agents/analyzer.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/agents/analyzer.py`
+- Create: `tests/agents/test_analyzer.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/agents/test_analyzer.py
+from unittest.mock import MagicMock
+from crypto_research_agent.agents.analyzer import Analyzer, AnalyzedItem
+from crypto_research_agent.services.substack import Article
+
+
+def _article():
+    return Article(title="Bitcoin ETF approved",
+                   author="A", date="2026-01-01",
+                   text="The SEC approved Bitcoin ETF.", url="u")
+
+
+def test_analyze_article_returns_analyzed_item():
+    backend = MagicMock()
+    backend.complete_json.return_value = {
+        "relevance_score": "High",
+        "key_insights": ["SEC approved"],
+        "mentioned_projects": ["Bitcoin"],
+        "thesis_alignment": "Not Applicable",
+    }
+    analyzer = Analyzer(backend, model="m")
+    result = analyzer.analyze(_article(), main_topic="Bitcoin ETF", thesis=None)
+    assert isinstance(result, AnalyzedItem)
+    assert result.relevance_score == "High"
+    assert result.key_insights == ["SEC approved"]
+
+
+def test_analyze_returns_none_for_non_english():
+    backend = MagicMock()
+    backend.complete_json.return_value = {"non_english": True, "language_detected": "Spanish"}
+    analyzer = Analyzer(backend, model="m")
+    assert analyzer.analyze(_article(), main_topic="x", thesis=None) is None
+
+
+def test_analyze_uses_thesis_alignment_when_provided():
+    backend = MagicMock()
+    backend.complete_json.return_value = {
+        "relevance_score": "Medium",
+        "thesis_alignment": "High",
+        "thesis_alignment_explanation": "matches",
+        "key_insights": [],
+        "mentioned_projects": [],
+    }
+    analyzer = Analyzer(backend, model="m")
+    result = analyzer.analyze(_article(), main_topic="x", thesis="my thesis")
+    assert result.relevance_score == "High"  # promoted from thesis_alignment
+
+
+def test_analyze_batch_short_circuits_in_test_mode():
+    backend = MagicMock()
+    backend.complete_json.return_value = {
+        "relevance_score": "High", "key_insights": [], "mentioned_projects": [],
+        "thesis_alignment": "Not Applicable",
+    }
+    analyzer = Analyzer(backend, model="m")
+    results = analyzer.analyze_batch(
+        [_article(), _article(), _article(), _article()],
+        main_topic="x", thesis=None, test_mode=True,
+    )
+    assert len(results) == 2  # stops after 2 high/medium
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/agents/analyzer.py
+from dataclasses import dataclass, field
+from typing import Literal
+
+from ..services.substack import Article
+from ..services.youtube import Video
+from ..utils.token_utils import truncate_to_token_limit
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+RelevanceScore = Literal["High", "Medium", "Low", "Error"]
+
+
+@dataclass
+class AnalyzedItem:
+    title: str
+    author: str
+    date: str
+    url: str
+    text: str
+    relevance_score: RelevanceScore
+    key_insights: list[str] = field(default_factory=list)
+    mentioned_projects: list[str] = field(default_factory=list)
+    thesis_alignment: str = "Not Applicable"
+    relevance_explanation: str = ""
+
+    def to_legacy_dict(self) -> dict:
+        return {
+            "title": self.title, "author": self.author, "date": self.date, "url": self.url,
+            "text": self.text, "relevance_score": self.relevance_score,
+            "key_insights": self.key_insights, "mentioned_projects": self.mentioned_projects,
+            "thesis_alignment": self.thesis_alignment,
+            "relevance_explanation": self.relevance_explanation,
+        }
+
+
+class Analyzer:
+    def __init__(self, backend, *, model: str):
+        self._backend = backend
+        self._model = model
+
+    def analyze(self, item: Article | Video,
+                *, main_topic: str, thesis: str | None) -> AnalyzedItem | None:
+        text_sample = truncate_to_token_limit(self._extract_text(item), self._model, 1500)
+        thesis_info = f"\nThesis Direction: {thesis}" if thesis else ""
+        prompt = f"""Analyze this crypto content for relevance.
+
+Search Topic: {main_topic}{thesis_info}
+
+Content:
+Title: {item.title}
+{text_sample}
+
+CRITICAL: First check if the content is in English.
+- If NOT in English, return: {{"non_english": true, "language_detected": "..."}}
+- If in English, return JSON with: relevance_score (High/Medium/Low),
+  relevance_explanation, key_insights (list), mentioned_projects (list),
+  thesis_alignment (High/Medium/Low/Not Applicable), thesis_alignment_explanation."""
+
+        result = self._backend.complete_json(
+            prompt=prompt, model=self._model,
+            system_prompt="You evaluate crypto content. Respond with valid JSON only.",
+        )
+        if not result:
+            return AnalyzedItem(
+                title=item.title, author=getattr(item, "author", getattr(item, "channel", "")),
+                date=item.date, url=item.url, text=self._extract_text(item),
+                relevance_score="Error", relevance_explanation="LLM returned empty response",
+            )
+        if result.get("non_english"):
+            logger.info("Discarding non-English: %s (%s)",
+                        item.title, result.get("language_detected", "?"))
+            return None
+        score = result.get("relevance_score", "Low")
+        if thesis and result.get("thesis_alignment") not in ("Not Applicable", "Error", None):
+            score = result["thesis_alignment"]
+        return AnalyzedItem(
+            title=item.title,
+            author=getattr(item, "author", getattr(item, "channel", "")),
+            date=item.date, url=item.url, text=self._extract_text(item),
+            relevance_score=score,
+            key_insights=result.get("key_insights", []),
+            mentioned_projects=result.get("mentioned_projects", []),
+            thesis_alignment=result.get("thesis_alignment", "Not Applicable"),
+            relevance_explanation=result.get("relevance_explanation", ""),
+        )
+
+    def analyze_batch(self, items, *, main_topic, thesis, test_mode=False) -> list[AnalyzedItem]:
+        analyzed: list[AnalyzedItem] = []
+        relevant_count = 0
+        for i, item in enumerate(items):
+            logger.info("Analyzing %d/%d: %s", i + 1, len(items), item.title)
+            r = self.analyze(item, main_topic=main_topic, thesis=thesis)
+            if r is None:
+                continue
+            analyzed.append(r)
+            if test_mode and r.relevance_score in ("High", "Medium"):
+                relevant_count += 1
+                if relevant_count >= 2:
+                    logger.info("Test mode: %d relevant items found, stopping", relevant_count)
+                    break
+        return analyzed
+
+    def extract_insights(self, content: str) -> tuple[list[str], list[str]]:
+        """Used by UserContentService — returns (key_insights, mentioned_projects)."""
+        sample = truncate_to_token_limit(content, self._model, 1500)
+        prompt = f"""Extract insights from this user-provided content.
+{sample}
+
+Return JSON with: key_insights (list of strings), mentioned_projects (list of strings)."""
+        result = self._backend.complete_json(
+            prompt=prompt, model=self._model,
+            system_prompt="Respond with valid JSON only.",
+        )
+        return (
+            result.get("key_insights", []),
+            result.get("mentioned_projects", []),
+        )
+
+    @staticmethod
+    def _extract_text(item) -> str:
+        if isinstance(item, Article):
+            return item.text or ""
+        if isinstance(item, Video):
+            return f"{item.description}\n\n{item.transcript or ''}"
+        return ""
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/agents/analyzer.py tests/agents/test_analyzer.py
+git commit -m "feat(agents): Analyzer with typed AnalyzedItem and batch + insights"
+```
+
+---
+
+### Task E3: `agents/summarizer.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/agents/summarizer.py`
+- Create: `tests/agents/test_summarizer.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/agents/test_summarizer.py
+from unittest.mock import MagicMock
+from crypto_research_agent.agents.summarizer import Summarizer
+from crypto_research_agent.agents.analyzer import AnalyzedItem
+
+
+def _item(title="t", score="High"):
+    return AnalyzedItem(title=title, author="a", date="d", url="u", text="t",
+                        relevance_score=score, key_insights=["i"])
+
+
+def test_summarize_returns_markdown():
+    backend = MagicMock()
+    backend.complete.return_value = MagicMock(text="# AI Agent Search Results\n...")
+    summer = Summarizer(backend, model="m")
+    out = summer.summarize(
+        articles=[_item("A1")], videos=[],
+        query="bitcoin", thesis=None,
+    )
+    assert out.startswith("# AI Agent Search Results")
+
+
+def test_summarize_returns_no_results_message_when_empty():
+    summer = Summarizer(MagicMock(), model="m")
+    out = summer.summarize(articles=[], videos=[], query="x", thesis=None)
+    assert "No relevant content found" in out
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement** — port `agents/summarization.py` to a clean class with the same prompt structure but typed inputs (`list[AnalyzedItem]`). For brevity, the prompt body is ~150 LOC unchanged from the original; preserve it verbatim under the new class.
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/agents/summarizer.py tests/agents/test_summarizer.py
+git commit -m "feat(agents): Summarizer returns research markdown"
+```
+
+---
+
+### Task E4: `agents/style_learner.py` — `StyleCard` dataclass
+
+**Files:**
+- Create: `src/crypto_research_agent/agents/style_card.py`
+- Create: `tests/agents/test_style_card.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/agents/test_style_card.py
+from crypto_research_agent.agents.style_card import StyleCard, Vocabulary
+
+
+def test_format_for_prompt_contains_all_sections():
+    card = StyleCard(
+        tone="analytical", sentence_patterns="short and punchy",
+        vocabulary=Vocabulary(preferred=["on-chain"], avoided=["massive"]),
+        paragraph_structure="claim then evidence",
+        section_openings="bold assertions",
+        transitions=["That said,"],
+        example_excerpts=["Excerpt 1."],
+    )
+    out = card.format_for_prompt()
+    assert "## Writing Style Guide" in out
+    assert "analytical" in out
+    assert "on-chain" in out
+    assert "massive" in out
+    assert "Excerpt 1." in out
+
+
+def test_to_dict_and_from_dict_roundtrip():
+    card = StyleCard.fallback()
+    assert StyleCard.from_dict(card.to_dict()) == card
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/agents/style_card.py
+from dataclasses import dataclass, field, asdict
+
+
+@dataclass
+class Vocabulary:
+    preferred: list[str] = field(default_factory=list)
+    avoided: list[str] = field(default_factory=list)
+
+
+@dataclass
+class StyleCard:
+    tone: str
+    sentence_patterns: str
+    vocabulary: Vocabulary
+    paragraph_structure: str
+    section_openings: str
+    transitions: list[str]
+    example_excerpts: list[str]
+
+    def format_for_prompt(self) -> str:
+        excerpts = "".join(f"\n> {x}\n" for x in self.example_excerpts)
+        preferred = ", ".join(self.vocabulary.preferred) or "none specified"
+        avoided = ", ".join(self.vocabulary.avoided) or "none specified"
+        transitions = ", ".join(f'"{t}"' for t in self.transitions) or "none specified"
+        return f"""## Writing Style Guide
+
+**Tone:** {self.tone}
+**Sentence patterns:** {self.sentence_patterns}
+**Paragraph structure:** {self.paragraph_structure}
+**Section openings:** {self.section_openings}
+**Preferred transitions:** {transitions}
+**Vocabulary to use:** {preferred}
+**Vocabulary to avoid:** {avoided}
+
+## Example Excerpts from the Author's Writing
+{excerpts}
+Match this voice precisely. Every section you write — including rewrites — must sound like these excerpts."""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "StyleCard":
+        v = d.get("vocabulary") or {}
+        return cls(
+            tone=d.get("tone", ""),
+            sentence_patterns=d.get("sentence_patterns", ""),
+            vocabulary=Vocabulary(
+                preferred=v.get("preferred", []) if isinstance(v, dict) else [],
+                avoided=v.get("avoided", []) if isinstance(v, dict) else [],
+            ),
+            paragraph_structure=d.get("paragraph_structure", ""),
+            section_openings=d.get("section_openings", ""),
+            transitions=d.get("transitions", []) or [],
+            example_excerpts=d.get("example_excerpts", []) or [],
+        )
+
+    @classmethod
+    def fallback(cls) -> "StyleCard":
+        return cls(
+            tone="analytical and informative",
+            sentence_patterns="clear and direct",
+            vocabulary=Vocabulary(),
+            paragraph_structure="structured with clear points",
+            section_openings="direct assertions",
+            transitions=[],
+            example_excerpts=[],
+        )
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/agents/style_card.py tests/agents/test_style_card.py
+git commit -m "feat(agents): StyleCard dataclass with format_for_prompt"
+```
+
+---
+
+### Task E5: `agents/style_learner.py` — sample loading + LLM extraction
+
+**Files:**
+- Create: `src/crypto_research_agent/agents/style_learner.py`
+- Create: `tests/agents/test_style_learner.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/agents/test_style_learner.py
+import json
+from unittest.mock import MagicMock
+from crypto_research_agent.agents.style_learner import StyleLearner
+from crypto_research_agent.agents.style_card import StyleCard
+
+
+def test_load_samples_handles_txt(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "a.txt").write_text("Sample one.")
+    (samples / "README.txt").write_text("ignore me")
+    learner = StyleLearner(MagicMock(), model="m",
+                           samples_dir=samples,
+                           instructions_file=tmp_path / "missing.txt")
+    materials = learner.get_raw_materials()
+    titles = [s["filename"] for s in materials["samples"]]
+    assert "a.txt" in titles
+    assert "README.txt" not in titles
+
+
+def test_generate_style_card_parses_llm_json(tmp_path):
+    backend = MagicMock()
+    backend.complete.return_value = MagicMock(text=json.dumps({
+        "tone": "analytical",
+        "sentence_patterns": "short",
+        "vocabulary": {"preferred": ["on-chain"], "avoided": ["huge"]},
+        "paragraph_structure": "claim then evidence",
+        "section_openings": "bold assertions",
+        "transitions": ["That said,"],
+        "example_excerpts": ["Sample."],
+    }))
+    learner = StyleLearner(backend, model="m",
+                           samples_dir=tmp_path, instructions_file=tmp_path / "i.txt")
+    card = learner.generate_style_card({"samples": [], "instructions": ""})
+    assert isinstance(card, StyleCard)
+    assert card.tone == "analytical"
+
+
+def test_generate_style_card_falls_back_on_garbage(tmp_path):
+    backend = MagicMock()
+    backend.complete.return_value = MagicMock(text="not json at all")
+    learner = StyleLearner(backend, model="m",
+                           samples_dir=tmp_path, instructions_file=tmp_path / "i.txt")
+    card = learner.generate_style_card({"samples": [], "instructions": ""})
+    assert card == StyleCard.fallback()
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/agents/style_learner.py
+import json
+import re
+from pathlib import Path
+import docx as docx_lib
+
+from .style_card import StyleCard
+from ..utils.token_utils import truncate_to_token_limit
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+class StyleLearner:
+    def __init__(self, backend, *, model: str,
+                 samples_dir: Path, instructions_file: Path):
+        self._backend = backend
+        self._model = model
+        self._samples_dir = Path(samples_dir)
+        self._instructions_file = Path(instructions_file)
+
+    def get_raw_materials(self) -> dict:
+        samples = []
+        if self._samples_dir.exists():
+            for f in self._samples_dir.iterdir():
+                if not f.is_file() or f.name == "README.txt":
+                    continue
+                if f.suffix.lower() == ".txt":
+                    samples.append({"filename": f.name,
+                                     "content": f.read_text(encoding="utf-8")})
+                elif f.suffix.lower() == ".docx":
+                    doc = docx_lib.Document(str(f))
+                    samples.append({"filename": f.name,
+                                     "content": "\n".join(p.text for p in doc.paragraphs)})
+        instructions = (
+            self._instructions_file.read_text(encoding="utf-8")
+            if self._instructions_file.exists() else ""
+        )
+        return {"samples": samples, "instructions": instructions}
+
+    def generate_style_card(self, materials: dict) -> StyleCard:
+        samples_text = ""
+        for s in materials.get("samples", []):
+            content = truncate_to_token_limit(s.get("content", ""), self._model, 3000)
+            samples_text += f"\n--- {s.get('filename', 'sample')} ---\n{content}\n"
+        instructions = materials.get("instructions") or ""
+        instr_block = f"\nExplicit writing instructions from author:\n{instructions}" if instructions else ""
+
+        prompt = f"""Analyze these writing samples and produce a style card capturing the author's voice precisely.
+
+{samples_text}{instr_block}
+
+Return JSON with these keys:
+- tone (string)
+- sentence_patterns (string)
+- vocabulary: {{ preferred: list, avoided: list }}
+- paragraph_structure (string)
+- section_openings (string)
+- transitions (list of strings)
+- example_excerpts (list of 3-5 verbatim excerpts)
+
+Focus on what makes this voice distinctive and reproducible."""
+
+        response = self._backend.complete(
+            prompt=prompt, model=self._model,
+            system_prompt="Extract precise, actionable style characteristics. Respond with valid JSON only.",
+        )
+        return self._parse(response.text)
+
+    @staticmethod
+    def _parse(text: str) -> StyleCard:
+        try:
+            return StyleCard.from_dict(json.loads(text))
+        except json.JSONDecodeError:
+            pass
+        match = JSON_OBJECT_RE.search(text)
+        if match:
+            try:
+                return StyleCard.from_dict(json.loads(match.group()))
+            except json.JSONDecodeError:
+                pass
+        logger.warning("Failed to parse style card; using fallback")
+        return StyleCard.fallback()
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/agents/style_learner.py tests/agents/test_style_learner.py
+git commit -m "feat(agents): StyleLearner generates StyleCard from samples"
+```
+
+---
+
+### Task E6: `agents/outline_writer.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/agents/outline_writer.py`
+- Create: `tests/agents/test_outline_writer.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/agents/test_outline_writer.py
+from unittest.mock import MagicMock
+from crypto_research_agent.agents.outline_writer import OutlineWriter
+
+
+def test_generate_returns_markdown_outline():
+    backend = MagicMock()
+    backend.complete.return_value = MagicMock(text="# Outline\n## 1. Intro\n- bullet")
+    ow = OutlineWriter(backend, model="m")
+    out = ow.generate(articles=[], videos=[], user_content=[],
+                     query="bitcoin", thesis=None, user_content_only=False)
+    assert "## 1." in out
+
+
+def test_revise_returns_string():
+    backend = MagicMock()
+    backend.complete.return_value = MagicMock(text="# Outline\n## 1. Updated\n- bullet")
+    ow = OutlineWriter(backend, model="m")
+    out = ow.revise(current="# Outline\n## 1. Old", instructions="rename",
+                    articles=[], videos=[], user_content=[],
+                    query="x", thesis=None)
+    assert "Updated" in out
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement** — port the long system prompt from `agents/outline_generator.py` verbatim, but split shared prompt text into a module-level constant. The class receives an injected backend and exposes only `generate(...)` and `revise(...)`.
+
+```python
+# src/crypto_research_agent/agents/outline_writer.py
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+_SHARED_GUIDELINES = """You are an expert cryptocurrency researcher creating outlines.
+
+Guidelines:
+- Numbered main sections (## 1. Title, ## 2. Title)
+- Numbered subsections (### 1.1 Title)
+- Bullet points within subsections
+- Source citations in [Title] brackets
+- Number of sections fits the content; do NOT default to 5
+
+Format:
+# Research Article Outline: [Title]
+## 1. Introduction
+- Hook
+- Thesis
+## N. Conclusion
+- Implications
+"""
+
+
+class OutlineWriter:
+    def __init__(self, backend, *, model: str):
+        self._backend = backend
+        self._model = model
+
+    def generate(self, *, articles, videos, user_content, query: str,
+                 thesis: str | None, user_content_only: bool) -> str:
+        sys_prompt = self._build_system_prompt(
+            has_user_content=bool(user_content),
+            user_content_only=user_content_only,
+        )
+        user_prompt = self._build_user_prompt(
+            articles, videos, user_content, query, thesis, current_outline=None,
+            instructions=None,
+        )
+        return self._backend.complete(prompt=user_prompt, model=self._model,
+                                       system_prompt=sys_prompt).text
+
+    def revise(self, *, current: str, instructions: str,
+               articles, videos, user_content, query: str,
+               thesis: str | None) -> str:
+        sys_prompt = self._build_system_prompt(has_user_content=bool(user_content),
+                                                 user_content_only=False,
+                                                 is_revision=True)
+        user_prompt = self._build_user_prompt(
+            articles, videos, user_content, query, thesis,
+            current_outline=current, instructions=instructions,
+        )
+        return self._backend.complete(prompt=user_prompt, model=self._model,
+                                       system_prompt=sys_prompt).text
+
+    def _build_system_prompt(self, *, has_user_content: bool,
+                              user_content_only: bool,
+                              is_revision: bool = False) -> str:
+        prompt = _SHARED_GUIDELINES
+        if user_content_only:
+            prompt += "\nNo Substack/YouTube content found. Use ONLY user-provided content."
+        if has_user_content:
+            prompt += "\nIntegrate user-provided content thoroughly. Cite [User Content Title]."
+        if is_revision:
+            prompt += "\nAddress the user's revision instructions while preserving format."
+        return prompt
+
+    def _build_user_prompt(self, articles, videos, user_content, query,
+                           thesis, current_outline, instructions) -> str:
+        parts = [f"# Research Query\n{query}"]
+        if thesis:
+            parts.append(f"# Thesis Direction\n{thesis}")
+        if current_outline:
+            parts.append(f"# Current Outline\n{current_outline}")
+        if instructions:
+            parts.append(f"# Revision Instructions\n{instructions}")
+        parts.append(f"# Research Sources\n{self._format_sources(articles, videos)}")
+        if user_content:
+            parts.append(f"# User Content\n{self._format_user_content(user_content)}")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _format_sources(articles, videos) -> str:
+        out = ""
+        if videos:
+            out += f"## Videos ({len(videos)})\n"
+            for i, v in enumerate(videos, 1):
+                out += f"{i}. **{v.title}** by {getattr(v, 'channel', '?')}\n"
+        if articles:
+            out += f"\n## Articles ({len(articles)})\n"
+            for i, a in enumerate(articles, 1):
+                out += f"{i}. **{a.title}** by {a.author}\n"
+                for ins in (a.key_insights or [])[:3]:
+                    out += f"   - {ins}\n"
+        return out or "No sources."
+
+    @staticmethod
+    def _format_user_content(user_content) -> str:
+        out = ""
+        for i, c in enumerate(user_content, 1):
+            out += f"### User Content {i}: {c.title} ({c.file_type})\n"
+            for ins in (c.key_insights or [])[:5]:
+                out += f"- {ins}\n"
+        return out
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/agents/outline_writer.py tests/agents/test_outline_writer.py
+git commit -m "feat(agents): OutlineWriter with shared prompt for generate/revise"
+```
+
+---
+
+### Task E7: `agents/article_writer.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/agents/article_writer.py`
+- Create: `tests/agents/test_article_writer.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/agents/test_article_writer.py
+from unittest.mock import MagicMock
+from pathlib import Path
+
+from crypto_research_agent.agents.article_writer import ArticleWriter, SectionInfo
+
+
+def _conv_returning(*responses):
+    conv = MagicMock()
+    conv.send.side_effect = list(responses)
+    return conv
+
+
+def test_start_article_creates_file_and_primes(tmp_path):
+    conv = _conv_returning("Acknowledged.")
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    path = aw.start_article(title="Bitcoin ETF",
+                             outline="## 1. Intro", research_summary="summary")
+    assert path.exists()
+    assert "# Bitcoin ETF" in path.read_text(encoding="utf-8")
+    assert conv.send.call_count == 1
+
+
+def test_write_section_appends_to_file(tmp_path):
+    conv = _conv_returning("Acknowledged.", "## Intro\n\nbody")
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    aw.start_article(title="T", outline="o", research_summary="s")
+    body = aw.write_section(SectionInfo(title="Intro", content="cover basics"), sources={})
+    assert body.startswith("## Intro")
+    assert "## Intro" in (tmp_path / "article.md").read_text(encoding="utf-8")
+    assert len(aw.accepted_sections) == 1
+
+
+def test_revise_section_does_not_append_to_file(tmp_path):
+    conv = _conv_returning("Acknowledged.", "## Intro\n\nv1", "## Intro\n\nv2")
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    aw.start_article(title="T", outline="o", research_summary="s")
+    aw.write_section(SectionInfo(title="Intro", content="x"), sources={})
+    revised = aw.revise_section("Intro", instructions="rewrite", current_content="## Intro\nv1")
+    assert "v2" in revised
+    # file still has v1 until accept_revision
+    assert "v1" in (tmp_path / "article.md").read_text(encoding="utf-8")
+
+
+def test_accept_revision_rewrites_file(tmp_path):
+    conv = _conv_returning("Acknowledged.", "## Intro\n\nv1", "## Intro\n\nv2")
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    aw.start_article(title="T", outline="o", research_summary="s")
+    aw.write_section(SectionInfo(title="Intro", content="x"), sources={})
+    aw.accept_revision("Intro", "## Intro\n\nv2")
+    text = (tmp_path / "article.md").read_text(encoding="utf-8")
+    assert "v2" in text
+    assert "v1" not in text
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/agents/article_writer.py
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class SectionInfo:
+    title: str
+    content: str
+
+
+@dataclass
+class _AcceptedSection:
+    title: str
+    content: str
+
+
+class ArticleWriter:
+    """Writes article sections via a stateful Conversation. Maintains an in-memory
+    list of accepted sections so the article file can be rewritten cleanly on revision."""
+
+    def __init__(self, conversation, *, output_path: Path):
+        self._conv = conversation
+        self._article_path = Path(output_path)
+        self._title = ""
+        self._accepted: list[_AcceptedSection] = []
+
+    @property
+    def accepted_sections(self) -> list[_AcceptedSection]:
+        return list(self._accepted)
+
+    @property
+    def article_path(self) -> Path:
+        return self._article_path
+
+    def start_article(self, *, title: str, outline: str, research_summary: str) -> Path:
+        self._title = title
+        priming = f"""I'm writing a cryptocurrency research article titled "{title}".
+
+## Article Outline
+{outline}
+
+## Research Summary
+{research_summary}
+
+I'll ask you to write each section one at a time. For each section I'll provide the outline details and relevant source materials. Write only the requested section — not the entire article.
+
+Please confirm you're ready to begin and briefly acknowledge the writing style you'll be matching."""
+        self._conv.send(priming)
+        self._article_path.parent.mkdir(parents=True, exist_ok=True)
+        self._article_path.write_text(f"# {title}\n\n", encoding="utf-8")
+        return self._article_path
+
+    def write_section(self, section: SectionInfo, sources: dict[str, Any]) -> str:
+        prompt = self._build_section_prompt(section, sources)
+        content = self._conv.send(prompt)
+        self._accepted.append(_AcceptedSection(title=section.title, content=content))
+        with self._article_path.open("a", encoding="utf-8") as fh:
+            fh.write(content + "\n\n")
+        return content
+
+    def revise_section(self, title: str, *, instructions: str, current_content: str) -> str:
+        prompt = f"""Please revise the "{title}" section based on this feedback:
+
+{instructions}
+
+Current version of this section:
+{current_content}
+
+Rewrite the entire section incorporating the feedback. Start with ## {title}
+Maintain the same writing style and voice. Do not change other sections."""
+        return self._conv.send(prompt)
+
+    def accept_revision(self, title: str, revised_content: str) -> None:
+        for s in self._accepted:
+            if s.title == title:
+                s.content = revised_content
+                break
+        else:
+            self._accepted.append(_AcceptedSection(title=title, content=revised_content))
+        with self._article_path.open("w", encoding="utf-8") as fh:
+            fh.write(f"# {self._title}\n\n")
+            for s in self._accepted:
+                fh.write(s.content + "\n\n")
+
+    def read_current_article(self) -> str:
+        return self._article_path.read_text(encoding="utf-8") if self._article_path.exists() else ""
+
+    @staticmethod
+    def _build_section_prompt(section: SectionInfo, sources: dict[str, Any]) -> str:
+        parts = [
+            f'Please write the "{section.title}" section now.',
+            "",
+            "## Section Outline",
+            section.content,
+            "",
+            "## Relevant Sources",
+            ArticleWriter._format_sources(sources) or "No specific sources for this section.",
+            "",
+            f"Write the section in Markdown, starting with ## {section.title}",
+            "Write only this section. Do not write other sections.",
+        ]
+        return "\n".join(parts)
+
+    @staticmethod
+    def _format_sources(sources: dict[str, Any]) -> str:
+        if not sources:
+            return ""
+        lines: list[str] = []
+        for tier, items in sources.items():
+            if not items:
+                continue
+            lines.append(f"\n### {tier}")
+            for i, src in enumerate(items, 1):
+                lines.append(f"\n**Source {i}: {src.get('title', 'Untitled')}**")
+                lines.append(src.get("text", ""))
+                if src.get("url"):
+                    lines.append(f"URL: {src['url']}")
+        return "\n".join(lines)
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/agents/article_writer.py tests/agents/test_article_writer.py
+git commit -m "feat(agents): ArticleWriter using injected Conversation"
+```
+
+---
+
+## Phase F — Feedback Layer
+
+### Task F1: `feedback/prompts.py` — input parser
+
+**Files:**
+- Create: `src/crypto_research_agent/feedback/prompts.py`
+- Create: `tests/feedback/__init__.py` (empty)
+- Create: `tests/feedback/test_prompts.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/feedback/test_prompts.py
+from crypto_research_agent.feedback.prompts import parse_feedback_input
+
+
+def test_accept_word_and_number():
+    assert parse_feedback_input("accept") == {"action": "accept", "details": None}
+    assert parse_feedback_input("1") == {"action": "accept", "details": None}
+
+
+def test_edited_word_and_number():
+    assert parse_feedback_input("edited") == {"action": "edited", "details": None}
+    assert parse_feedback_input("3") == {"action": "edited", "details": None}
+
+
+def test_revise_with_instructions_word_form():
+    out = parse_feedback_input("revise make it shorter")
+    assert out == {"action": "revise", "details": "make it shorter"}
+
+
+def test_revise_with_instructions_number_form():
+    out = parse_feedback_input("2 make it shorter")
+    assert out == {"action": "revise", "details": "make it shorter"}
+
+
+def test_revise_without_instructions_returns_invalid():
+    assert parse_feedback_input("revise") == {"action": "invalid", "details": None}
+    assert parse_feedback_input("2") == {"action": "invalid", "details": None}
+
+
+def test_unknown_input_returns_invalid():
+    assert parse_feedback_input("xyz")["action"] == "invalid"
+
+
+def test_handles_extra_whitespace_and_case():
+    out = parse_feedback_input("  ACCEPT  ")
+    assert out == {"action": "accept", "details": None}
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/feedback/prompts.py
+from typing import TypedDict, Literal
+
+
+Action = Literal["accept", "edited", "revise", "invalid"]
+
+
+class Feedback(TypedDict):
+    action: Action
+    details: str | None
+
+
+def parse_feedback_input(raw: str) -> Feedback:
+    s = (raw or "").strip()
+    if not s:
+        return {"action": "invalid", "details": None}
+    parts = s.split(maxsplit=1)
+    head = parts[0].lower()
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if head in ("accept", "1"):
+        return {"action": "accept", "details": None}
+    if head in ("edited", "3"):
+        return {"action": "edited", "details": None}
+    if head in ("revise", "2"):
+        if not rest:
+            return {"action": "invalid", "details": None}
+        return {"action": "revise", "details": rest}
+    return {"action": "invalid", "details": None}
+
+
+def render_review_prompt(*, item_label: str, file_path: str) -> str:
+    return f"""[FEEDBACK] {item_label} has been written.
+Review it: {file_path}
+
+  [1] accept     proceed
+  [2] revise     give the AI revision instructions
+  [3] edited     I edited the file directly
+"""
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/feedback/prompts.py tests/feedback/test_prompts.py tests/feedback/__init__.py
+git commit -m "feat(feedback): parse_feedback_input handles word + numeric commands"
+```
+
+---
+
+### Task F2: `feedback/section_review.py` and `feedback/outline_review.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/feedback/section_review.py`
+- Create: `src/crypto_research_agent/feedback/outline_review.py`
+- Create: `tests/feedback/test_section_review.py`
+- Create: `tests/feedback/test_outline_review.py`
+
+**Step 1: Failing tests** — minimal smoke tests:
+
+```python
+# tests/feedback/test_section_review.py
+from unittest.mock import MagicMock
+from crypto_research_agent.feedback.section_review import SectionReview
+
+
+def test_section_review_accept_returns_content_unchanged(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda *_: "accept")
+    sr = SectionReview()
+    aw = MagicMock()
+    out = sr.run(section_title="Intro", section_content="## Intro\nbody",
+                 article_writer=aw, sources={})
+    assert out == "## Intro\nbody"
+    aw.revise_section.assert_not_called()
+
+
+def test_section_review_revise_calls_writer(monkeypatch):
+    inputs = iter(["revise tighten paragraph 2", "accept"])
+    monkeypatch.setattr("builtins.input", lambda *_: next(inputs))
+    sr = SectionReview()
+    aw = MagicMock()
+    aw.revise_section.return_value = "## Intro\nv2"
+    out = sr.run(section_title="Intro", section_content="## Intro\nv1",
+                 article_writer=aw, sources={})
+    assert out == "## Intro\nv2"
+    aw.revise_section.assert_called_once()
+    aw.accept_revision.assert_called_once_with("Intro", "## Intro\nv2")
+```
+
+```python
+# tests/feedback/test_outline_review.py
+from unittest.mock import MagicMock
+from crypto_research_agent.feedback.outline_review import OutlineReview
+
+
+def test_outline_review_accept(tmp_path, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda *_: "accept")
+    f = tmp_path / "outline.md"
+    f.write_text("# x")
+    out = OutlineReview().run(outline_path=f, outline_writer=MagicMock(),
+                              articles=[], videos=[], user_content=[],
+                              query="q", thesis=None)
+    assert out == "# x"
+
+
+def test_outline_review_revise_calls_writer(tmp_path, monkeypatch):
+    inputs = iter(["revise add a section", "accept"])
+    monkeypatch.setattr("builtins.input", lambda *_: next(inputs))
+    f = tmp_path / "outline.md"
+    f.write_text("# v1")
+    ow = MagicMock()
+    ow.revise.return_value = "# v2"
+    final = OutlineReview().run(outline_path=f, outline_writer=ow,
+                                articles=[], videos=[], user_content=[],
+                                query="q", thesis=None)
+    assert final == "# v2"
+    assert f.read_text() == "# v2"
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/feedback/section_review.py
+from .prompts import parse_feedback_input, render_review_prompt
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class SectionReview:
+    def run(self, *, section_title: str, section_content: str,
+            article_writer, sources) -> str:
+        print(render_review_prompt(item_label=f"Section '{section_title}'",
+                                    file_path=str(article_writer.article_path)))
+        current = section_content
+        while True:
+            raw = input("> ")
+            fb = parse_feedback_input(raw)
+            if fb["action"] == "accept":
+                return current
+            if fb["action"] == "edited":
+                # Caller is expected to detect external edits via the article writer's file
+                logger.info("Manual edits accepted")
+                return current
+            if fb["action"] == "revise":
+                revised = article_writer.revise_section(
+                    section_title, instructions=fb["details"], current_content=current,
+                )
+                article_writer.accept_revision(section_title, revised)
+                current = revised
+                print(render_review_prompt(
+                    item_label=f"Revised section '{section_title}'",
+                    file_path=str(article_writer.article_path),
+                ))
+                continue
+            print("Invalid input. Use [1] accept / [2] revise <instructions> / [3] edited")
+```
+
+```python
+# src/crypto_research_agent/feedback/outline_review.py
+from pathlib import Path
+from .prompts import parse_feedback_input, render_review_prompt
+
+
+class OutlineReview:
+    def run(self, *, outline_path: Path, outline_writer,
+            articles, videos, user_content, query: str, thesis: str | None) -> str:
+        outline_path = Path(outline_path)
+        print(render_review_prompt(item_label="Outline", file_path=str(outline_path)))
+        current = outline_path.read_text(encoding="utf-8")
+        while True:
+            raw = input("> ")
+            fb = parse_feedback_input(raw)
+            if fb["action"] == "accept":
+                return current
+            if fb["action"] == "edited":
+                current = outline_path.read_text(encoding="utf-8")
+                return current
+            if fb["action"] == "revise":
+                revised = outline_writer.revise(
+                    current=current, instructions=fb["details"],
+                    articles=articles, videos=videos, user_content=user_content,
+                    query=query, thesis=thesis,
+                )
+                outline_path.write_text(revised, encoding="utf-8")
+                current = revised
+                print(render_review_prompt(item_label="Revised outline",
+                                            file_path=str(outline_path)))
+                continue
+            print("Invalid input. Use [1] accept / [2] revise <instructions> / [3] edited")
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/feedback/section_review.py \
+        src/crypto_research_agent/feedback/outline_review.py \
+        tests/feedback/test_section_review.py \
+        tests/feedback/test_outline_review.py
+git commit -m "feat(feedback): SectionReview + OutlineReview interactive loops"
+```
+
+---
+
+## Phase G — Pipeline Orchestration
+
+### Task G1: `pipeline/runner.py` — `RunContext` + skeleton
+
+**Files:**
+- Create: `src/crypto_research_agent/pipeline/runner.py`
+- Create: `tests/pipeline/__init__.py`
+- Create: `tests/pipeline/test_run_context.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/pipeline/test_run_context.py
+from pathlib import Path
+from crypto_research_agent.pipeline.runner import RunContext, SourceConfig
+
+
+def test_run_context_holds_fields(tmp_path):
+    ctx = RunContext(
+        query="bitcoin", thesis=None, output_dir=tmp_path,
+        test_mode=False, search_mode=False,
+        sources=SourceConfig(substack=True, youtube=True),
+        max_age_days=None, parallel=1,
+    )
+    assert ctx.query == "bitcoin"
+    assert ctx.sources.substack
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/pipeline/runner.py
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class SourceConfig:
+    substack: bool
+    youtube: bool
+
+
+@dataclass
+class RunContext:
+    query: str
+    thesis: str | None
+    output_dir: Path
+    test_mode: bool
+    search_mode: bool
+    sources: SourceConfig
+    max_age_days: int | None
+    parallel: int = 1
+
+
+class PipelineRunner:
+    """Top-level orchestrator. Composes pipeline stages, owns LLMRouter."""
+    # Filled in by later tasks (G2..G6).
+    pass
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/pipeline/runner.py tests/pipeline/test_run_context.py tests/pipeline/__init__.py
+git commit -m "feat(pipeline): RunContext + SourceConfig + PipelineRunner skeleton"
+```
+
+---
+
+### Task G2: `pipeline/discovery.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/pipeline/discovery.py`
+- Create: `tests/pipeline/test_discovery.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/pipeline/test_discovery.py
+from unittest.mock import MagicMock
+from pathlib import Path
+
+from crypto_research_agent.pipeline.discovery import DiscoveryStage
+from crypto_research_agent.pipeline.runner import RunContext, SourceConfig
+from crypto_research_agent.agents.coordinator import SearchPlan
+from crypto_research_agent.services.substack import Article
+from crypto_research_agent.agents.analyzer import AnalyzedItem
+
+
+def _ctx(tmp_path, substack=True, youtube=True):
+    return RunContext(query="q", thesis=None, output_dir=tmp_path,
+                      test_mode=False, search_mode=False,
+                      sources=SourceConfig(substack=substack, youtube=youtube),
+                      max_age_days=None)
+
+
+def test_discovery_runs_substack_only(tmp_path):
+    article = Article(title="Bitcoin ETF", author="A", date="2026", text="bitcoin etf", url="u")
+    substack = MagicMock()
+    substack.discover.return_value = [article]
+    youtube = MagicMock()
+    analyzer = MagicMock()
+    analyzer.analyze_batch.return_value = [
+        AnalyzedItem(title="Bitcoin ETF", author="A", date="2026", url="u", text="t",
+                     relevance_score="High")
+    ]
+
+    stage = DiscoveryStage(
+        ctx=_ctx(tmp_path, substack=True, youtube=False),
+        substack_service=substack, youtube_service=youtube, analyzer=analyzer,
+    )
+    articles, videos = stage.run(SearchPlan(main_topic="x", required_terms=["bitcoin", "etf"]))
+    assert len(articles) == 1
+    assert videos == []
+    youtube.search.assert_not_called()
+
+
+def test_discovery_filters_with_required_terms(tmp_path):
+    keep = Article(title="Bitcoin ETF", author="A", date="2026", text="bitcoin etf yes", url="u1")
+    drop = Article(title="Bitcoin only", author="A", date="2026", text="just bitcoin", url="u2")
+    substack = MagicMock()
+    substack.discover.return_value = [keep, drop]
+    analyzer = MagicMock()
+    analyzer.analyze_batch.return_value = [
+        AnalyzedItem(title="Bitcoin ETF", author="A", date="2026", url="u1", text="t",
+                     relevance_score="High")
+    ]
+    stage = DiscoveryStage(
+        ctx=_ctx(tmp_path, substack=True, youtube=False),
+        substack_service=substack, youtube_service=MagicMock(), analyzer=analyzer,
+    )
+    stage.run(SearchPlan(main_topic="x", required_terms=["bitcoin", "etf"]))
+    pre_filter_passed = analyzer.analyze_batch.call_args.kwargs.get("items") or analyzer.analyze_batch.call_args.args[0]
+    assert len(pre_filter_passed) == 1
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/pipeline/discovery.py
+from ..agents.analyzer import AnalyzedItem
+from ..agents.coordinator import SearchPlan
+from ..utils.filters import contains_all_required_terms
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class DiscoveryStage:
+    def __init__(self, *, ctx, substack_service, youtube_service, analyzer):
+        self._ctx = ctx
+        self._substack = substack_service
+        self._youtube = youtube_service
+        self._analyzer = analyzer
+
+    def run(self, plan: SearchPlan) -> tuple[list[AnalyzedItem], list[AnalyzedItem]]:
+        articles = self._discover_substack(plan) if self._ctx.sources.substack else []
+        videos = self._discover_youtube(plan) if self._ctx.sources.youtube else []
+        return articles, videos
+
+    def _discover_substack(self, plan: SearchPlan) -> list[AnalyzedItem]:
+        raw = list(self._substack.discover(
+            max_age_days=self._ctx.max_age_days, test_mode=self._ctx.test_mode,
+        ))
+        logger.info("Substack: retrieved %d articles", len(raw))
+        prefiltered = [
+            a for a in raw if contains_all_required_terms(
+                {"title": a.title, "text": a.text}, plan.required_terms,
+            )
+        ]
+        logger.info("Substack: %d passed required-term filter", len(prefiltered))
+        return [
+            r for r in self._analyzer.analyze_batch(
+                items=prefiltered, main_topic=plan.main_topic,
+                thesis=self._ctx.thesis, test_mode=self._ctx.test_mode,
+            ) if r.relevance_score in ("High", "Medium")
+        ]
+
+    def _discover_youtube(self, plan: SearchPlan) -> list[AnalyzedItem]:
+        videos = self._youtube.search(
+            query=self._ctx.query, required_terms=plan.required_terms,
+            max_results=5, max_age_days=self._ctx.max_age_days,
+            test_mode=self._ctx.test_mode, output_dir=self._ctx.output_dir,
+        )
+        logger.info("YouTube: %d videos with transcripts", len(videos))
+        return [
+            r for r in self._analyzer.analyze_batch(
+                items=videos, main_topic=plan.main_topic,
+                thesis=self._ctx.thesis, test_mode=self._ctx.test_mode,
+            ) if r.relevance_score in ("High", "Medium")
+        ]
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/pipeline/discovery.py tests/pipeline/test_discovery.py
+git commit -m "feat(pipeline): DiscoveryStage runs Substack/YouTube + Analyzer"
+```
+
+---
+
+### Task G3: `pipeline/synthesis.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/pipeline/synthesis.py`
+- Create: `tests/pipeline/test_synthesis.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/pipeline/test_synthesis.py
+from unittest.mock import MagicMock
+from crypto_research_agent.pipeline.synthesis import SynthesisStage
+
+
+def test_save_summary_writes_file(tmp_path):
+    summarizer = MagicMock()
+    summarizer.summarize.return_value = "# Results\nbody"
+    outline_writer = MagicMock()
+    stage = SynthesisStage(
+        ctx=MagicMock(output_dir=tmp_path, query="q", thesis=None),
+        summarizer=summarizer, outline_writer=outline_writer, outline_review=MagicMock(),
+    )
+    out = stage.save_summary(articles=[], videos=[])
+    assert out.endswith("research_results.md")
+    assert (tmp_path / "research_results.md").read_text(encoding="utf-8").startswith("# Results")
+
+
+def test_synthesize_runs_outline_writer_and_review(tmp_path):
+    summarizer = MagicMock()
+    summarizer.summarize.return_value = "# Summary"
+    outline_writer = MagicMock()
+    outline_writer.generate.return_value = "# Outline"
+    review = MagicMock()
+    review.run.return_value = "# Outline approved"
+    stage = SynthesisStage(
+        ctx=MagicMock(output_dir=tmp_path, query="q", thesis=None),
+        summarizer=summarizer, outline_writer=outline_writer, outline_review=review,
+    )
+    final = stage.synthesize(articles=[], videos=[], user_content=[],
+                              user_content_only=False)
+    assert final == "# Outline approved"
+    assert (tmp_path / "research_outline.md").exists()
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/pipeline/synthesis.py
+from pathlib import Path
+
+from ..config import RESEARCH_RESULTS_FILENAME, OUTLINE_FILENAME
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class SynthesisStage:
+    def __init__(self, *, ctx, summarizer, outline_writer, outline_review):
+        self._ctx = ctx
+        self._summarizer = summarizer
+        self._outline_writer = outline_writer
+        self._outline_review = outline_review
+
+    def save_summary(self, *, articles, videos) -> Path:
+        text = self._summarizer.summarize(
+            articles=articles, videos=videos,
+            query=self._ctx.query, thesis=self._ctx.thesis,
+        )
+        out = Path(self._ctx.output_dir) / RESEARCH_RESULTS_FILENAME
+        out.write_text(text, encoding="utf-8")
+        logger.info("Research summary saved: %s", out)
+        return out
+
+    def synthesize(self, *, articles, videos, user_content, user_content_only: bool) -> str:
+        self.save_summary(articles=articles, videos=videos) if (articles or videos) else None
+        outline = self._outline_writer.generate(
+            articles=articles, videos=videos, user_content=user_content,
+            query=self._ctx.query, thesis=self._ctx.thesis,
+            user_content_only=user_content_only,
+        )
+        outline_path = Path(self._ctx.output_dir) / OUTLINE_FILENAME
+        outline_path.write_text(outline, encoding="utf-8")
+        return self._outline_review.run(
+            outline_path=outline_path,
+            outline_writer=self._outline_writer,
+            articles=articles, videos=videos, user_content=user_content,
+            query=self._ctx.query, thesis=self._ctx.thesis,
+        )
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/pipeline/synthesis.py tests/pipeline/test_synthesis.py
+git commit -m "feat(pipeline): SynthesisStage saves summary + drives outline review"
+```
+
+---
+
+### Task G4: `pipeline/writing.py`
+
+**Files:**
+- Create: `src/crypto_research_agent/pipeline/writing.py`
+- Create: `tests/pipeline/test_writing.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/pipeline/test_writing.py
+from unittest.mock import MagicMock
+import json
+
+from crypto_research_agent.pipeline.writing import WritingStage
+from crypto_research_agent.agents.style_card import StyleCard
+
+
+def test_writing_stage_persists_style_card_and_loops_sections(tmp_path):
+    style_learner = MagicMock()
+    style_learner.get_raw_materials.return_value = {"samples": [], "instructions": ""}
+    style_learner.generate_style_card.return_value = StyleCard.fallback()
+    article_writer_factory = MagicMock()
+    article_writer = MagicMock()
+    article_writer.article_path = tmp_path / "article.md"
+    article_writer.write_section.side_effect = lambda s, sources: f"## {s.title}\nbody"
+    article_writer_factory.return_value = article_writer
+    section_review = MagicMock()
+    section_review.run.side_effect = lambda **kw: kw["section_content"]
+
+    stage = WritingStage(
+        ctx=MagicMock(output_dir=tmp_path, query="q"),
+        style_learner=style_learner,
+        article_writer_factory=article_writer_factory,
+        section_review=section_review,
+    )
+    sections = [{"title": "Intro", "content": "outline"},
+                {"title": "Body", "content": "outline"}]
+    stage.write(outline="# o", sections=sections, articles=[], videos=[], user_content=[],
+                research_summary="summary", user_content_only=False)
+    assert (tmp_path / "style_card.json").exists()
+    assert article_writer.write_section.call_count == 2
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/pipeline/writing.py
+import json
+from pathlib import Path
+from typing import Callable
+
+from ..agents.article_writer import SectionInfo
+from ..config import STYLE_CARD_FILENAME, ARTICLE_FILENAME
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def relevant_sources_for(section_title: str, articles, videos, user_content,
+                          *, user_content_only: bool) -> dict:
+    keywords = [w for w in section_title.lower().split() if len(w) > 3]
+    out: dict[str, list] = {
+        "User Content": [
+            {"title": c.title, "text": c.text, "url": c.url}
+            for c in (user_content or [])
+        ],
+        "YouTube": [], "High Relevance Articles": [], "Medium Relevance Articles": [],
+    }
+    if user_content_only:
+        return out
+    for v in videos:
+        title = v.title.lower()
+        if v.relevance_score == "High" or any(k in title for k in keywords):
+            out["YouTube"].append({"title": v.title, "text": " ".join(v.key_insights), "url": v.url})
+    for a in articles:
+        title = a.title.lower(); text = a.text.lower()
+        if a.relevance_score == "High" or any(k in title or k in text for k in keywords):
+            out["High Relevance Articles"].append({"title": a.title, "text": a.text, "url": a.url})
+        elif a.relevance_score == "Medium":
+            out["Medium Relevance Articles"].append({"title": a.title, "text": a.text, "url": a.url})
+    return out
+
+
+class WritingStage:
+    def __init__(self, *, ctx, style_learner,
+                 article_writer_factory: Callable, section_review):
+        self._ctx = ctx
+        self._style_learner = style_learner
+        self._article_writer_factory = article_writer_factory
+        self._section_review = section_review
+
+    def write(self, *, outline: str, sections: list[dict],
+              articles, videos, user_content, research_summary: str,
+              user_content_only: bool) -> Path:
+        materials = self._style_learner.get_raw_materials()
+        card = self._style_learner.generate_style_card(materials)
+        card_path = Path(self._ctx.output_dir) / STYLE_CARD_FILENAME
+        card_path.write_text(json.dumps(card.to_dict(), indent=2), encoding="utf-8")
+        logger.info("Style card saved: %s", card_path)
+
+        article_path = Path(self._ctx.output_dir) / ARTICLE_FILENAME
+        writer = self._article_writer_factory(card=card, output_path=article_path)
+        writer.start_article(title=self._ctx.query, outline=outline,
+                              research_summary=research_summary)
+
+        for section in sections:
+            sources = relevant_sources_for(
+                section["title"], articles, videos, user_content,
+                user_content_only=user_content_only,
+            )
+            content = writer.write_section(
+                SectionInfo(title=section["title"], content=section["content"]),
+                sources,
+            )
+            self._section_review.run(
+                section_title=section["title"], section_content=content,
+                article_writer=writer, sources=sources,
+            )
+        return article_path
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/pipeline/writing.py tests/pipeline/test_writing.py
+git commit -m "feat(pipeline): WritingStage with style card + section loop"
+```
+
+---
+
+### Task G5: `pipeline/runner.py` — full `PipelineRunner.run()`
+
+**Files:**
+- Modify: `src/crypto_research_agent/pipeline/runner.py`
+- Create: `tests/pipeline/test_runner_e2e.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/pipeline/test_runner_e2e.py
+from unittest.mock import MagicMock, patch
+from pathlib import Path
+
+from crypto_research_agent.pipeline.runner import (
+    PipelineRunner, RunContext, SourceConfig,
+)
+
+
+def test_runner_full_pipeline_with_mocks(tmp_path, monkeypatch):
+    """End-to-end with all stages mocked: verifies the wiring."""
+    # Each stage is replaced with a mock returning expected outputs
+    monkeypatch.setattr("builtins.input", lambda *_: "ready")  # user content prompt
+    runner = PipelineRunner.__new__(PipelineRunner)
+    runner._build_coordinator = MagicMock(return_value=MagicMock(
+        plan=MagicMock(return_value=MagicMock(main_topic="t", required_terms=["x"]))
+    ))
+    runner._build_discovery = MagicMock(return_value=MagicMock(
+        run=MagicMock(return_value=([MagicMock()], [MagicMock()]))
+    ))
+    runner._build_synthesis = MagicMock(return_value=MagicMock(
+        save_summary=MagicMock(),
+        synthesize=MagicMock(return_value="# Outline\n## 1. Intro\n- bullet"),
+    ))
+    runner._build_writing = MagicMock(return_value=MagicMock(
+        write=MagicMock(return_value=tmp_path / "article.md"),
+    ))
+    runner._build_user_content = MagicMock(return_value=MagicMock(
+        collect=MagicMock(return_value=[]),
+    ))
+    runner._build_docx_export = MagicMock(return_value=MagicMock(
+        export=MagicMock(return_value=tmp_path / "article.docx"),
+    ))
+    runner._stats = MagicMock()
+
+    ctx = RunContext(query="q", thesis=None, output_dir=tmp_path,
+                     test_mode=True, search_mode=False,
+                     sources=SourceConfig(substack=True, youtube=True),
+                     max_age_days=None, parallel=1)
+    runner.run_with_context(ctx)
+    runner._build_writing.assert_called()
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement** — replace skeleton in `pipeline/runner.py` with full orchestrator:
+
+```python
+# Append to src/crypto_research_agent/pipeline/runner.py
+
+from ..agents.coordinator import Coordinator
+from ..agents.analyzer import Analyzer
+from ..agents.summarizer import Summarizer
+from ..agents.outline_writer import OutlineWriter
+from ..agents.style_learner import StyleLearner
+from ..agents.article_writer import ArticleWriter
+from ..llm.conversation import Conversation
+from ..llm.router import LLMRouter
+from ..llm.claude_code import ClaudeCodeBackend
+from ..llm.api_backend import AnthropicAPIBackend
+from ..services.substack import SubstackService
+from ..services.youtube import YouTubeService
+from ..services.docx_export import DocxExporter
+from ..services.user_content import UserContentService
+from ..feedback.outline_review import OutlineReview
+from ..feedback.section_review import SectionReview
+from ..pipeline.discovery import DiscoveryStage
+from ..pipeline.synthesis import SynthesisStage
+from ..pipeline.writing import WritingStage
+from ..utils.outline_parser import parse_sections
+from ..config import (
+    SUBSTACK_CSV, YOUTUBE_CSV, WRITING_SAMPLES_DIR, WRITING_INSTRUCTIONS_FILE,
+    SUPADATA_API_KEY, YOUTUBE_API_KEY, CLOUDCONVERT_API_KEY, ANTHROPIC_API_KEY,
+    CLAUDE_PREMIUM_MODEL, CLAUDE_SONNET_MODEL,
+    get_model_for_role,
+)
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class PipelineRunner:
+    def run_with_context(self, ctx: RunContext) -> None:
+        ctx.output_dir.mkdir(parents=True, exist_ok=True)
+        router = self._build_router()
+        coordinator = self._build_coordinator(ctx, router)
+        plan = coordinator.plan(ctx.query)
+        logger.info("Plan: %s", plan)
+
+        discovery = self._build_discovery(ctx, router)
+        articles, videos = discovery.run(plan)
+
+        if not articles and not videos:
+            if not self._user_wants_to_continue_with_user_content():
+                return
+
+        if ctx.search_mode:
+            self._build_synthesis(ctx, router).save_summary(articles=articles, videos=videos)
+            return
+
+        user_content_svc = self._build_user_content(ctx, router)
+        user_content = user_content_svc.collect(ctx.output_dir / "user_content") \
+            if self._user_wants_to_add_content() else []
+
+        synthesis = self._build_synthesis(ctx, router)
+        outline = synthesis.synthesize(
+            articles=articles, videos=videos, user_content=user_content,
+            user_content_only=not (articles or videos),
+        )
+
+        writing = self._build_writing(ctx, router, plan_main_topic=plan.main_topic,
+                                       research_summary="")  # research summary built earlier
+        writing.write(
+            outline=outline, sections=parse_sections(outline),
+            articles=articles, videos=videos, user_content=user_content,
+            research_summary="",  # filled if needed
+            user_content_only=not (articles or videos),
+        )
+
+        if CLOUDCONVERT_API_KEY:
+            DocxExporter(api_key=CLOUDCONVERT_API_KEY).convert_markdown_to_docx(
+                ctx.output_dir / "article.md",
+            )
+        self._print_run_summary(ctx, router)
+
+    # ---- Builder methods (extracted for test isolation) ----
+
+    def _build_router(self) -> LLMRouter:
+        primary = ClaudeCodeBackend()
+        router = LLMRouter(primary=primary)
+        router.set_fallback_factory(self._fallback_factory)
+        router.on_quota_exhausted = self._prompt_quota_exhausted
+        return router
+
+    def _fallback_factory(self, choice: str):
+        return AnthropicAPIBackend(api_key=ANTHROPIC_API_KEY)
+
+    @staticmethod
+    def _prompt_quota_exhausted() -> str:
+        print("\n[QUOTA] Your Claude Max subscription quota is exhausted.")
+        print("        Continue using the Anthropic API (pay-per-token)?")
+        print("\n  [1] Continue with Opus")
+        print("  [2] Continue with Sonnet")
+        print("  [3] Abort\n")
+        while True:
+            choice = input("> ").strip()
+            if choice == "1": return "opus"
+            if choice == "2": return "sonnet"
+            if choice == "3": return "abort"
+            print("Invalid. Pick 1/2/3.")
+
+    def _build_coordinator(self, ctx, router):
+        return Coordinator(router, model=get_model_for_role("fast", test_mode=ctx.test_mode))
+
+    def _build_discovery(self, ctx, router):
+        analyzer = Analyzer(router, model=get_model_for_role("fast", test_mode=ctx.test_mode))
+        return DiscoveryStage(
+            ctx=ctx,
+            substack_service=SubstackService(SUBSTACK_CSV),
+            youtube_service=YouTubeService(api_key=YOUTUBE_API_KEY,
+                                             supadata_key=SUPADATA_API_KEY,
+                                             channels_csv=YOUTUBE_CSV),
+            analyzer=analyzer,
+        )
+
+    def _build_synthesis(self, ctx, router):
+        return SynthesisStage(
+            ctx=ctx,
+            summarizer=Summarizer(router,
+                                   model=get_model_for_role("fast", test_mode=ctx.test_mode)),
+            outline_writer=OutlineWriter(router,
+                                          model=get_model_for_role("premium",
+                                                                     test_mode=ctx.test_mode)),
+            outline_review=OutlineReview(),
+        )
+
+    def _build_writing(self, ctx, router, *, plan_main_topic, research_summary):
+        style_learner = StyleLearner(
+            router, model=get_model_for_role("premium", test_mode=ctx.test_mode),
+            samples_dir=WRITING_SAMPLES_DIR, instructions_file=WRITING_INSTRUCTIONS_FILE,
+        )
+        def factory(card, output_path):
+            sys_prompt = self._build_writer_system_prompt(card)
+            conv = Conversation(router,
+                                model=get_model_for_role("premium", test_mode=ctx.test_mode),
+                                system_prompt=sys_prompt)
+            return ArticleWriter(conv, output_path=output_path)
+        return WritingStage(
+            ctx=ctx, style_learner=style_learner,
+            article_writer_factory=factory, section_review=SectionReview(),
+        )
+
+    def _build_user_content(self, ctx, router):
+        analyzer = Analyzer(router, model=get_model_for_role("fast", test_mode=ctx.test_mode))
+        return UserContentService(analyzer=analyzer)
+
+    @staticmethod
+    def _build_writer_system_prompt(card) -> str:
+        return f"""You are a respected crypto analyst writing a research article.
+
+{card.format_for_prompt()}
+
+CRITICAL: Every section you write and every revision you make MUST match the writing style above.
+Match the example excerpts' rhythm, vocabulary, and tone precisely.
+Do not use generic AI writing patterns."""
+
+    @staticmethod
+    def _user_wants_to_continue_with_user_content() -> bool:
+        print("\n[NOTICE] No relevant content from Substack or YouTube.")
+        print("  [1] Abort   [2] Continue with your own materials")
+        return input("> ").strip() == "2"
+
+    @staticmethod
+    def _user_wants_to_add_content() -> bool:
+        print("\n[USER CONTENT] Add files to user_content/, then 'ready', or 'skip' to continue without.")
+        return input("> ").strip().lower() == "ready"
+
+    def _print_run_summary(self, ctx, router):
+        # Filled in Task G6
+        pass
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/pipeline/runner.py tests/pipeline/test_runner_e2e.py
+git commit -m "feat(pipeline): full PipelineRunner with router + stage builders"
+```
+
+---
+
+### Task G6: Run summary + cost tracking
+
+**Files:**
+- Modify: `src/crypto_research_agent/pipeline/runner.py`
+- Create: `src/crypto_research_agent/pipeline/stats.py`
+- Create: `tests/pipeline/test_stats.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/pipeline/test_stats.py
+from crypto_research_agent.pipeline.stats import RunStats
+
+
+def test_run_stats_records_calls_and_cost():
+    s = RunStats()
+    s.record_call(cost_usd=0.01, tier="primary")
+    s.record_call(cost_usd=0.02, tier="primary")
+    s.record_call(cost_usd=0.03, tier="fallback")
+    summary = s.format_summary(query_label="bitcoin_etf")
+    assert "Total calls:        3" in summary
+    assert "Subscription:       2" in summary
+    assert "API fallback:       1" in summary
+    assert "$0.06" in summary
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/pipeline/stats.py
+from dataclasses import dataclass, field
+import datetime
+
+
+@dataclass
+class RunStats:
+    started_at: datetime.datetime = field(default_factory=datetime.datetime.now)
+    calls_primary: int = 0
+    calls_fallback: int = 0
+    total_cost_usd: float = 0.0
+
+    def record_call(self, *, cost_usd: float, tier: str) -> None:
+        if tier == "primary":
+            self.calls_primary += 1
+        else:
+            self.calls_fallback += 1
+        self.total_cost_usd += cost_usd
+
+    @property
+    def total_calls(self) -> int:
+        return self.calls_primary + self.calls_fallback
+
+    def format_summary(self, *, query_label: str) -> str:
+        elapsed = (datetime.datetime.now() - self.started_at)
+        return f"""=== Run Summary: {query_label} ===
+  Duration:           {self._format_duration(elapsed)}
+  Total calls:        {self.total_calls}
+    Subscription:     {self.calls_primary}
+    API fallback:     {self.calls_fallback}
+  Approx. quota cost: ${self.total_cost_usd:.2f} (would-be API equivalent)
+"""
+
+    @staticmethod
+    def _format_duration(d: datetime.timedelta) -> str:
+        m, s = divmod(int(d.total_seconds()), 60)
+        return f"{m}m {s}s"
+```
+
+Wire into `PipelineRunner` (modify): add `self._stats = RunStats()` in `__init__`, add a wrapper backend that increments `_stats.record_call` on each call (or attach as a hook), and replace `_print_run_summary` body with:
+
+```python
+def _print_run_summary(self, ctx, router):
+    print(self._stats.format_summary(query_label=ctx.output_dir.name))
+```
+
+For cost tracking on each call, wrap router.complete to also update stats. Simplest: subclass `LLMRouter` or add an `on_response` callback. Add this to `LLMRouter` later if desired; for now, leave call counting as future work and just print the summary header without exact counts.
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/pipeline/stats.py src/crypto_research_agent/pipeline/runner.py tests/pipeline/test_stats.py
+git commit -m "feat(pipeline): RunStats with summary printing"
+```
+
+---
+
+## Phase H — CLI
+
+### Task H1: `cli.py` argument parser + entry point
+
+**Files:**
+- Create: `src/crypto_research_agent/cli.py`
+- Create: `tests/test_cli.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/test_cli.py
+from crypto_research_agent.cli import build_parser
+
+
+def test_parser_query_required():
+    parser = build_parser()
+    args = parser.parse_args(["bitcoin", "ETF"])
+    assert args.query == ["bitcoin", "ETF"]
+
+
+def test_parser_test_mode_flag():
+    parser = build_parser()
+    args = parser.parse_args(["x", "--test"])
+    assert args.test is True
+
+
+def test_parser_thesis_string():
+    parser = build_parser()
+    args = parser.parse_args(["x", "--thesis", "my thesis"])
+    assert args.thesis == "my thesis"
+
+
+def test_parser_max_age_int():
+    parser = build_parser()
+    args = parser.parse_args(["x", "--max-age", "30"])
+    assert args.max_age == 30
+
+
+def test_parser_parallel_default_one():
+    parser = build_parser()
+    args = parser.parse_args(["x"])
+    assert args.parallel == 1
+```
+
+**Step 2: Verify failure.**
+
+**Step 3: Implement**
+
+```python
+# src/crypto_research_agent/cli.py
+import argparse
+
+from .pipeline.runner import PipelineRunner, RunContext, SourceConfig
+from .config import OUTPUT_DIR
+from .utils.paths import build_output_dir
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="crypto-research",
+                                description="Crypto Research Agent")
+    p.add_argument("query", nargs="+", help="Research query")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--test", action="store_true",
+                      help="Test mode: Haiku for everything; stops early")
+    mode.add_argument("--search", action="store_true",
+                      help="Search mode: discovery only, no outline/article")
+    p.add_argument("--youtube", action="store_true", help="YouTube only")
+    p.add_argument("--substack", action="store_true", help="Substack only")
+    p.add_argument("--thesis", type=str, help="Thesis direction")
+    p.add_argument("--max-age", type=int, dest="max_age",
+                   help="Only include content newer than N days")
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Parallel analyzer calls (max 3)")
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    sources = SourceConfig(
+        substack=args.substack or not args.youtube,
+        youtube=args.youtube or not args.substack,
+    )
+    if args.youtube and args.substack:
+        sources = SourceConfig(substack=True, youtube=True)
+    query = " ".join(args.query)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = build_output_dir(OUTPUT_DIR, query)
+    ctx = RunContext(
+        query=query, thesis=args.thesis, output_dir=output_dir,
+        test_mode=args.test, search_mode=args.search,
+        sources=sources, max_age_days=args.max_age,
+        parallel=min(args.parallel, 3),
+    )
+    PipelineRunner().run_with_context(ctx)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add src/crypto_research_agent/cli.py tests/test_cli.py
+git commit -m "feat(cli): argparse entry point + main()"
+```
+
+---
+
+## Phase I — Integration & Golden Tests
+
+### Task I1: Conftest fixtures + `FakeLLMBackend`
+
+**Files:**
+- Modify: `tests/conftest.py`
+
+**Step 1: Add fixtures**
+
+```python
+# tests/conftest.py
+from dataclasses import dataclass, field
+from typing import Any
+import pytest
+
+from crypto_research_agent.llm.types import ClaudeResponse
+
+
+@dataclass
+class CallRecord:
+    prompt: str
+    model: str
+    system_prompt: str
+    resume_session: str | None
+    method: str  # "complete" | "complete_json"
+
+
+@dataclass
+class FakeLLMBackend:
+    responses: list[Any] = field(default_factory=list)
+    json_responses: list[dict] = field(default_factory=list)
+    calls: list[CallRecord] = field(default_factory=list)
+
+    def complete(self, prompt: str, *, model: str,
+                 system_prompt: str = "", resume_session: str | None = None) -> ClaudeResponse:
+        self.calls.append(CallRecord(prompt, model, system_prompt, resume_session, "complete"))
+        text = self.responses.pop(0) if self.responses else "default"
+        return ClaudeResponse(text=str(text), session_id=f"sess-{len(self.calls)}",
+                              cost_usd=0.001, input_tokens=10, output_tokens=5)
+
+    def complete_json(self, prompt: str, *, model: str,
+                       system_prompt: str = "") -> dict:
+        self.calls.append(CallRecord(prompt, model, system_prompt, None, "complete_json"))
+        return self.json_responses.pop(0) if self.json_responses else {}
+
+
+@pytest.fixture
+def fake_llm():
+    return FakeLLMBackend()
+```
+
+**Step 2: Commit**
+
+```bash
+git add tests/conftest.py
+git commit -m "test: add FakeLLMBackend fixture for unit + e2e tests"
+```
+
+---
+
+### Task I2: End-to-end pipeline test
+
+**Files:**
+- Create: `tests/pipeline/test_e2e.py`
+- Create: `tests/pipeline/fixtures/e2e_responses.json`
+
+**Step 1: Fixture file** — list of all LLM responses for the E2E run, in order.
+
+```json
+[
+  {"main_topic": "Bitcoin ETF", "required_terms": ["bitcoin", "etf"]},
+  {"relevance_score": "High", "key_insights": ["i1"], "mentioned_projects": ["Bitcoin"], "thesis_alignment": "Not Applicable"},
+  "# Research Results\nbody",
+  "# Outline\n## 1. Intro\n- bullet\n## 2. Body\n- bullet\n",
+  {"tone": "analytical", "sentence_patterns": "short", "vocabulary": {"preferred": [], "avoided": []}, "paragraph_structure": "p", "section_openings": "s", "transitions": [], "example_excerpts": ["e"]},
+  "Acknowledged.",
+  "## 1. Intro\n\nBody one.",
+  "## 2. Body\n\nBody two."
+]
+```
+
+**Step 2: Implement test** (pseudocode skeleton — full impl injects FakeLLMBackend everywhere via constructor swaps and uses `responses` for HTTP):
+
+```python
+# tests/pipeline/test_e2e.py
+import json
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import pytest
+
+from crypto_research_agent.pipeline.runner import PipelineRunner, RunContext, SourceConfig
+
+
+@pytest.mark.skip(reason="E2E test scaffolding; flesh out after all stages stable")
+def test_e2e_pipeline_writes_all_outputs(tmp_path, monkeypatch, fake_llm):
+    """Full run with all LLM and HTTP calls mocked."""
+    pass
+```
+
+(The full E2E body will be filled in once all upstream tasks are passing — comment captures the intent.)
+
+**Step 3: Commit**
+
+```bash
+git add tests/pipeline/test_e2e.py tests/pipeline/fixtures/
+git commit -m "test: scaffolding for E2E pipeline test (skipped until stable)"
+```
+
+---
+
+### Task I3: Golden file tests
+
+**Files:**
+- Create: `tests/golden/__init__.py`
+- Create: `tests/golden/test_style_card_format.py`
+- Create: `tests/golden/style_card_prompt.txt`
+- Create: `tests/golden/run_summary.txt`
+- Create: `tests/golden/test_run_summary.py`
+
+**Step 1: Failing test**
+
+```python
+# tests/golden/test_style_card_format.py
+from pathlib import Path
+from crypto_research_agent.agents.style_card import StyleCard, Vocabulary
+
+
+def test_style_card_format_matches_golden():
+    card = StyleCard(
+        tone="analytical and informative", sentence_patterns="short and punchy",
+        vocabulary=Vocabulary(preferred=["on-chain"], avoided=["massive"]),
+        paragraph_structure="claim then evidence", section_openings="bold assertions",
+        transitions=["That said,"], example_excerpts=["Excerpt 1.", "Excerpt 2."],
+    )
+    expected = (Path(__file__).parent / "style_card_prompt.txt").read_text(encoding="utf-8")
+    assert card.format_for_prompt() == expected.rstrip("\n")
+```
+
+```python
+# tests/golden/test_run_summary.py
+import datetime
+from pathlib import Path
+from freezegun import freeze_time
+from crypto_research_agent.pipeline.stats import RunStats
+
+
+@freeze_time("2026-05-04 14:23:01")
+def test_run_summary_matches_golden():
+    s = RunStats(started_at=datetime.datetime(2026, 5, 4, 14, 14, 1))
+    s.record_call(cost_usd=2.0, tier="primary")
+    s.record_call(cost_usd=1.5, tier="primary")
+    s.record_call(cost_usd=0.77, tier="fallback")
+    expected = (Path(__file__).parent / "run_summary.txt").read_text(encoding="utf-8")
+    assert s.format_summary(query_label="bitcoin_etf_2026-05-04_142301") == expected
+```
+
+**Step 2: Run; expect failure** (golden files missing or content mismatch on first run).
+
+**Step 3: Generate golden files** — run both tests, manually capture actual output to the corresponding `.txt` files:
+
+```bash
+pytest tests/golden/ --snapshot-update 2>/dev/null || true
+# Or manually:
+python -c "from crypto_research_agent.agents.style_card import StyleCard, Vocabulary; \
+    print(StyleCard(tone='analytical and informative', sentence_patterns='short and punchy', \
+    vocabulary=Vocabulary(preferred=['on-chain'], avoided=['massive']), \
+    paragraph_structure='claim then evidence', section_openings='bold assertions', \
+    transitions=['That said,'], example_excerpts=['Excerpt 1.', 'Excerpt 2.']).format_for_prompt())" \
+    > tests/golden/style_card_prompt.txt
+```
+
+**Step 4: Verify pass.**
+
+**Step 5: Commit**
+
+```bash
+git add tests/golden/
+git commit -m "test: golden snapshots for style card prompt + run summary"
+```
+
+---
+
+### Task I4: Live smoke test (gated)
+
+**Files:**
+- Create: `tests/integration/__init__.py`
+- Create: `tests/integration/test_real_claude_smoke.py`
+
+**Step 1: Write test**
+
+```python
+# tests/integration/test_real_claude_smoke.py
+import os
+import pytest
+
+from crypto_research_agent.llm.claude_code import ClaudeCodeBackend
+from crypto_research_agent.config import CLAUDE_FAST_MODEL
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_LIVE_TESTS") != "1",
+    reason="Live test against real `claude -p`; set RUN_LIVE_TESTS=1 to enable.",
+)
+def test_one_real_claude_call_completes():
+    backend = ClaudeCodeBackend()
+    response = backend.complete(
+        prompt="Reply with the single word: pong",
+        model=CLAUDE_FAST_MODEL,
+        system_prompt="Respond with exactly one word.",
+    )
+    assert "pong" in response.text.lower()
+    assert response.session_id is not None
+    assert response.cost_usd >= 0.0
+```
+
+**Step 2: Verify (gated)**
+
+Run normally: `pytest tests/integration/` → SKIPPED.
+Run live: `RUN_LIVE_TESTS=1 pytest tests/integration/` → PASS (locally).
+
+**Step 3: Commit**
+
+```bash
+git add tests/integration/
+git commit -m "test: gated live smoke test for real claude -p invocation"
+```
+
+---
+
+## Phase J — Cleanup & Cutover
+
+### Task J1: Manual smoke test of new pipeline against test mode
+
+**No tests added. This is a manual verification step.**
+
+```bash
+# Make sure claude CLI is set up:
+claude setup-token
+
+# Verify dependencies are pinned and installed:
+pip install -e ".[dev]"
+
+# Run new CLI in test mode (Haiku for everything, fast):
+crypto-research "Bitcoin ETF" --test --substack
+
+# Expected: pipeline runs through to completion, writes:
+#   output/bitcoin_etf_<TS>/research_results.md
+#   output/bitcoin_etf_<TS>/research_outline.md
+#   output/bitcoin_etf_<TS>/style_card.json
+#   output/bitcoin_etf_<TS>/article.md
+```
+
+**If anything fails, fix forward in the relevant phase. Do not proceed to J2 until manual smoke passes.**
+
+**Commit (none — purely verification).**
+
+---
+
+### Task J2: Delete old `agents/`, `utils/`, `main.py`, old tests
+
+**Files to delete:**
+- `agents/` (entire directory)
+- `utils/` (entire directory)
+- `main.py`
+- `config.py` (old, project-root)
+- `__init__.py` (project-root)
+- `tests/agents/` (the old test files — keep `tests/agents/__init__.py` for the new tests)
+- `tests/utils/` (same)
+
+**Step 1: Delete old code**
+
+```bash
+git rm -r agents utils tests/agents tests/utils
+git rm main.py config.py __init__.py
+```
+
+(Tests for new code live in the new `tests/agents/` and `tests/utils/` paths under the same dirs — but wait, the directory structure is the same. To avoid name collisions, the new tests must already be in place. Verify before deleting.)
+
+**Caution:** the new tests already use `tests/agents/` and `tests/utils/` in this plan. Make sure they exist and pass BEFORE running `git rm`. The deletion below targets the old test files, which have different names from the new ones.
+
+A safer approach: list the specific old test files to delete:
+
+```bash
+git rm tests/agents/test_anthropic_client.py
+git rm tests/agents/test_claude_agent_base.py
+git rm tests/agents/test_batch_migration.py
+git rm tests/agents/test_youtube_migration.py
+git rm tests/agents/test_outline_migration.py
+git rm tests/agents/test_article_writer.py     # OLD — collides with new
+git rm tests/agents/test_style_learning.py
+git rm tests/agents/test_feedback_processor.py
+git rm tests/agents/test_coordinator.py        # OLD — collides with new
+git rm tests/agents/test_analysis.py
+```
+
+Wait — the new tests use `tests/agents/test_coordinator.py` and `tests/agents/test_article_writer.py` too. Plan adjustment: when creating new test files, name them with a `_new.py` suffix during the side-by-side phase, then rename in J2 after deleting old ones.
+
+**Updated procedure for Task J2:**
+
+1. Confirm new tests pass (run `pytest tests/`).
+2. `git rm` all old test files (listed above).
+3. `git rm` `agents/`, `utils/`, `main.py`, `config.py`, `__init__.py`.
+4. (No renames needed if you used `_new.py` suffix during dev.) Otherwise, ensure no test import path collision.
+5. Run `pytest tests/` — all must pass.
+
+**Step 2: Verify**
+
+```bash
+pytest tests/ -v
+# Expect: all tests pass, ~150 tests
+```
+
+**Step 3: Commit**
+
+```bash
+git add -A
+git commit -m "chore: delete legacy agents/, utils/, main.py — replaced by src/ package"
+```
+
+---
+
+### Task J3: Update `requirements.txt` (deprecate in favor of pyproject.toml)
+
+**Files:**
+- Modify: `requirements.txt` (replace contents with reference)
+
+**Step 1: Replace with**
+
+```
+# Dependencies are managed via pyproject.toml.
+# Install with: pip install -e ".[dev]"
+```
+
+**Step 2: Commit**
+
+```bash
+git add requirements.txt
+git commit -m "build: deprecate requirements.txt in favor of pyproject.toml"
+```
+
+---
+
+### Task J4: Update `.env.template`
+
+**Files:**
+- Modify: `.env.template`
+
+**Step 1: New content**
+
+```
+# === Required for personal local use ===
+# Run `claude setup-token` to generate; required for subscription billing
+# CLAUDE_CODE_OAUTH_TOKEN=
+
+# === External APIs (still required; not Claude-related) ===
+SUPADATA_API_KEY=your-supadata-api-key-here
+CLOUDCONVERT_API_KEY=your-cloudconvert-api-key-here
+YOUTUBE_API_KEY=your-youtube-api-key-here
+
+# === Optional: API fallback ===
+# Used only if subscription quota runs out mid-run; otherwise can be left empty
+ANTHROPIC_API_KEY=
+```
+
+**Step 2: Commit**
+
+```bash
+git add .env.template
+git commit -m "docs: update .env.template — Claude billing now via subscription"
+```
+
+---
+
+### Task J5: Update `README.md`
+
+**Files:**
+- Modify: `README.md`
+
+**Step 1: Update top-of-file installation + usage sections** to reflect:
+- Python 3.13 requirement
+- `claude setup-token` prerequisite
+- `pip install -e ".[dev]"` install
+- `crypto-research "<query>"` console script
+- Subscription billing default; API key only as fallback
+
+Keep most domain-content sections (writing samples, output files, etc.) unchanged.
+
+**Step 2: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: update README for new package layout + subscription billing"
+```
+
+---
+
+### Task J6: Final full-suite verification
+
+**No code changes. Verification only.**
+
+```bash
+pytest tests/ -v
+# Expect: ~150 tests, all pass
+
+# Live smoke (optional, requires subscription):
+RUN_LIVE_TESTS=1 pytest tests/integration/ -v
+# Expect: 1 test passes
+
+# Manual end-to-end:
+crypto-research "Ethereum Layer 2" --test --youtube
+# Expect: full pipeline runs to completion
+```
+
+**No commit.**
+
+---
+
+## Done
+
+When all tasks above pass:
+- The package is at `src/crypto_research_agent/` with proper `pip install -e .` support
+- All LLM calls route through `claude -p` subprocess (subscription billing)
+- API fallback prompts user once on quota exhaustion
+- Fact-checker is gone
+- Output dirs use clean `query_TS` naming
+- ~150 tests across all layers, all green
+- 12 mixed "agents" → 6 real agents + 5 services + 4 pipeline stages
+- ~600 LOC removed (vs net additions in tests + new abstractions)
+
+---
+
+## Notes for the executing engineer
+
+- **Side-by-side strategy:** old code stays functional during Phases A–I. Don't import from `src/` into old code or vice versa.
+- **Test name collisions in Phase J:** if you keep new test names matching old ones (e.g. `tests/agents/test_coordinator.py`), pytest may discover both during dev. Either:
+  (a) Use a `_new.py` suffix during dev and rename in J2, OR
+  (b) Delete old test files immediately after each new file passes (per-task cleanup).
+  Option (b) is cleaner — adapt the per-task commits to include `git rm tests/agents/test_<old>.py` once the new test passes.
+- **Long prompts in `claude -p`:** if argv length is a concern, switch the implementation in `_invoke_once` to pass `prompt` via stdin (`subprocess.run(..., input=prompt)`). Tested in B2/B3 paths via the same mocking; will require minimal changes.
+- **Conversation in API fallback:** the `AnthropicAPIBackend._sessions` dict grows unboundedly within a run. Acceptable for a personal tool with at most one outline/article session per run; not appropriate as a long-lived server.
+- **Concurrency (`--parallel`):** scaffolding present in `RunContext.parallel` but not wired through Analyzer yet. Add only if the engineer wants it; honor `min(args.parallel, 3)` cap.
+
