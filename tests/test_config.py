@@ -24,3 +24,9 @@ def test_get_model_for_role_invalid_raises():
     import pytest
     with pytest.raises(KeyError):
         get_model_for_role("nonsense", test_mode=False)
+
+
+def test_get_model_for_role_test_mode_is_keyword_only():
+    import pytest
+    with pytest.raises(TypeError):
+        get_model_for_role("fast", True)  # type: ignore[misc]
