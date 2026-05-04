@@ -27,7 +27,8 @@ class ClaudeCodeBackend:
         cmd = self._build_command(model=model, system_prompt=system_prompt,
                                   resume_session=resume_session, prompt=prompt)
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=self._timeout, check=False,
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            timeout=self._timeout, check=False,
         )
         return self._parse_response(result)
 
