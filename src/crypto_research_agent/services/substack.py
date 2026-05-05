@@ -1,9 +1,13 @@
+import datetime
+import time
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
 import requests
 
+from ..utils.csv_loader import load_substack_urls
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -82,3 +86,81 @@ class _Post:
             if data.get(field):
                 return data[field]
         return None
+
+
+class SubstackService:
+    """Discover and fetch Substack posts. Consolidates legacy DatabaseSearch + ArticleRetrieval + API client."""
+
+    PAGE_SIZE = 25
+
+    def __init__(self, csv_path: Path | str, *, request_delay: float = 0.05):
+        self._urls = load_substack_urls(Path(csv_path))
+        self._delay = request_delay
+        logger.info("Loaded %d Substack URLs from %s", len(self._urls), csv_path)
+
+    def discover(self, *, max_age_days: int | None,
+                 test_mode: bool) -> Iterator[Article]:
+        """Yield articles across all configured Substacks."""
+        articles_per_substack = 10 if test_mode else 200
+        max_substacks = 30 if test_mode else len(self._urls)
+        for url in self._urls[:max_substacks]:
+            yield from self.fetch_posts(url, max_articles=articles_per_substack,
+                                         max_age_days=max_age_days)
+            time.sleep(self._delay)
+
+    def fetch_posts(self, newsletter_url: str, *, max_articles: int,
+                     max_age_days: int | None) -> list[Article]:
+        nl = self._make_newsletter(newsletter_url)
+        articles: list[Article] = []
+        offset = 0
+        while True:
+            batch = nl.get_posts(limit=self.PAGE_SIZE, offset=offset, sorting="new")
+            if not batch:
+                break
+            for post in batch:
+                article = self._post_to_article(post)
+                if article is None:
+                    continue
+                if max_age_days is not None and self._is_too_old(article, max_age_days):
+                    continue
+                articles.append(article)
+                if len(articles) >= max_articles:
+                    return articles
+            if len(batch) < self.PAGE_SIZE:
+                break
+            offset += self.PAGE_SIZE
+            time.sleep(self._delay)
+        return articles
+
+    def _make_newsletter(self, url: str) -> _Newsletter:
+        return _Newsletter(url)
+
+    @staticmethod
+    def _post_to_article(post: _Post) -> Article | None:
+        meta = post.get_metadata()
+        if not meta:
+            return None
+        body = post.get_content() or ""
+        description = meta.get("description") or ""
+        return Article(
+            title=meta.get("title", "Unknown Title"),
+            author=meta.get("byline", "Unknown Author"),
+            date=meta.get("post_date", ""),
+            text=f"{description}\n\n{body}".strip(),
+            url=meta.get("canonical_url", post.url),
+        )
+
+    @staticmethod
+    def _is_too_old(article: Article, max_age_days: int) -> bool:
+        if not article.date:
+            return False
+        try:
+            d = datetime.datetime.fromisoformat(article.date.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                d = datetime.datetime.strptime(article.date, "%Y-%m-%d")
+                d = d.replace(tzinfo=datetime.timezone.utc)
+            except ValueError:
+                return False
+        delta = datetime.datetime.now(datetime.timezone.utc) - d
+        return delta.days > max_age_days
