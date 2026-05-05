@@ -1,79 +1,51 @@
-# tests/agents/test_article_writer.py
-import sys
-sys.path.insert(0, '.')
 from unittest.mock import MagicMock
-import os
-import tempfile
+
+from crypto_research_agent.agents.article_writer import ArticleWriter, SectionInfo
 
 
-def make_mock_client(section_response="## Section\n\nContent here."):
-    mock = MagicMock()
-    mock.generate_with_history.return_value = section_response
-    mock.generate_content.return_value = "Understood. Ready to begin."
-    return mock
+def _conv_returning(*responses):
+    conv = MagicMock()
+    conv.send.side_effect = list(responses)
+    return conv
 
 
-def test_start_article_creates_file_with_title():
-    mock_client = make_mock_client()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        from agents.article_writer import ArticleWriterAgent
-        agent = ArticleWriterAgent(mock_client)
-        result = agent.start_article(
-            title="Bitcoin ETF Analysis",
-            query_output_dir=tmpdir,
-            style_card_str="## Writing Style Guide\nTone: analytical",
-            outline="## Section 1\n## Section 2",
-            research_summary="Summary here"
-        )
-        assert os.path.exists(result)
-        with open(result) as f:
-            content = f.read()
-        assert "Bitcoin ETF Analysis" in content
+def test_start_article_creates_file_and_primes(tmp_path):
+    conv = _conv_returning("Acknowledged.")
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    path = aw.start_article(title="Bitcoin ETF",
+                             outline="## 1. Intro", research_summary="summary")
+    assert path.exists()
+    assert "# Bitcoin ETF" in path.read_text(encoding="utf-8")
+    assert conv.send.call_count == 1
 
 
-def test_start_article_initializes_conversation_history():
-    mock_client = make_mock_client()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        from agents.article_writer import ArticleWriterAgent
-        agent = ArticleWriterAgent(mock_client)
-        agent.start_article("Title", tmpdir, "Style", "Outline", "Summary")
-        assert len(agent.conversation_history) >= 2  # initial user message + ack
+def test_write_section_appends_to_file(tmp_path):
+    conv = _conv_returning("Acknowledged.", "## Intro\n\nbody")
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    aw.start_article(title="T", outline="o", research_summary="s")
+    body = aw.write_section(SectionInfo(title="Intro", content="cover basics"), sources={})
+    assert body.startswith("## Intro")
+    assert "## Intro" in (tmp_path / "article.md").read_text(encoding="utf-8")
+    assert len(aw.accepted_sections) == 1
 
 
-def test_write_section_appends_to_conversation():
-    mock_client = make_mock_client("## Introduction\n\nThis is the intro.")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        from agents.article_writer import ArticleWriterAgent
-        agent = ArticleWriterAgent(mock_client)
-        agent.start_article("Title", tmpdir, "Style", "Outline", "Research")
-        initial_len = len(agent.conversation_history)
-
-        agent.write_section({'title': 'Introduction', 'content': 'Cover basics'}, {})
-        assert len(agent.conversation_history) == initial_len + 2  # user msg + assistant response
-
-
-def test_revise_section_appends_to_existing_conversation():
-    mock_client = make_mock_client("## Introduction\n\nRevised content.")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        from agents.article_writer import ArticleWriterAgent
-        agent = ArticleWriterAgent(mock_client)
-        agent.start_article("Title", tmpdir, "Style", "Outline", "Research")
-        agent.write_section({'title': 'Introduction', 'content': 'Cover basics'}, {})
-        after_write = len(agent.conversation_history)
-
-        agent.revise_section('Introduction', 'Make it shorter', '## Introduction\n\nOriginal.')
-        assert len(agent.conversation_history) == after_write + 2
+def test_revise_section_does_not_append_to_file(tmp_path):
+    conv = _conv_returning("Acknowledged.", "## Intro\n\nv1", "## Intro\n\nv2")
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    aw.start_article(title="T", outline="o", research_summary="s")
+    aw.write_section(SectionInfo(title="Intro", content="x"), sources={})
+    revised = aw.revise_section("Intro", instructions="rewrite", current_content="## Intro\nv1")
+    assert "v2" in revised
+    # file still has v1 until accept_revision
+    assert "v1" in (tmp_path / "article.md").read_text(encoding="utf-8")
 
 
-def test_accept_revision_rewrites_article_file():
-    mock_client = make_mock_client()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        from agents.article_writer import ArticleWriterAgent
-        agent = ArticleWriterAgent(mock_client)
-        agent.start_article("Title", tmpdir, "Style", "Outline", "Research")
-        agent.write_section({'title': 'Intro', 'content': 'outline'}, {})
-
-        agent.accept_revision('Intro', '## Intro\n\nRevised and improved.')
-        with open(agent.article_file) as f:
-            content = f.read()
-        assert 'Revised and improved.' in content
+def test_accept_revision_rewrites_file(tmp_path):
+    conv = _conv_returning("Acknowledged.", "## Intro\n\nv1", "## Intro\n\nv2")
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    aw.start_article(title="T", outline="o", research_summary="s")
+    aw.write_section(SectionInfo(title="Intro", content="x"), sources={})
+    aw.accept_revision("Intro", "## Intro\n\nv2")
+    text = (tmp_path / "article.md").read_text(encoding="utf-8")
+    assert "v2" in text
+    assert "v1" not in text
