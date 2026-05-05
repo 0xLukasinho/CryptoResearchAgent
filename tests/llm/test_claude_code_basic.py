@@ -65,3 +65,21 @@ def test_complete_passes_resume_flag_when_session_id_provided():
     args = mock_run.call_args.args[0]
     assert "--resume" in args
     assert "sess-1" in args
+
+
+def test_complete_omits_system_prompt_flag_when_resuming_session():
+    """When --resume is passed, --append-system-prompt should NOT be added,
+    because the system prompt is already baked into the resumed session."""
+    backend = ClaudeCodeBackend()
+    fake_stdout = {"result": "ok", "session_id": "s", "total_cost_usd": 0.0,
+                   "usage": {"input_tokens": 0, "output_tokens": 0}, "is_error": False}
+    with patch("subprocess.run", return_value=_mock_run(fake_stdout)) as mock_run:
+        backend.complete(
+            prompt="next",
+            model="claude-haiku-4-5-20251001",
+            system_prompt="be terse",
+            resume_session="sess-1",
+        )
+    args = mock_run.call_args.args[0]
+    assert "--append-system-prompt" not in args
+    assert "--resume" in args and "sess-1" in args

@@ -23,7 +23,7 @@ class Conversation:
         response = self._backend.complete(
             prompt=user_message,
             model=self._model,
-            system_prompt=self._system_prompt if self._turn_count == 0 else "",
+            system_prompt=self._system_prompt,
             resume_session=self._session_id,
         )
         self._session_id = response.session_id

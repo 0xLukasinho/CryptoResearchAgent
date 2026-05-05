@@ -104,7 +104,7 @@ class ClaudeCodeBackend:
             "--allowedTools", "",
             "--model", model,
         ]
-        if system_prompt:
+        if system_prompt and not resume_session:
             cmd.extend(["--append-system-prompt", system_prompt])
         if resume_session:
             cmd.extend(["--resume", resume_session])

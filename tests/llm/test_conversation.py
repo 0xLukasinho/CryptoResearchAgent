@@ -21,7 +21,7 @@ def test_first_send_passes_system_prompt_no_resume():
     assert out == "ack"
 
 
-def test_subsequent_send_passes_resume_no_system_prompt():
+def test_subsequent_send_always_passes_system_prompt():
     backend = MagicMock()
     backend.complete.side_effect = [_resp("first", sid="sess-1"),
                                      _resp("second", sid="sess-1")]
@@ -30,7 +30,7 @@ def test_subsequent_send_passes_resume_no_system_prompt():
     conv.send("turn-2")
     second_kwargs = backend.complete.call_args_list[1].kwargs
     assert second_kwargs["resume_session"] == "sess-1"
-    assert second_kwargs["system_prompt"] == ""
+    assert second_kwargs["system_prompt"] == "sys"
 
 
 def test_session_id_persisted_across_turns():
