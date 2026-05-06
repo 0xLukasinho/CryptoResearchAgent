@@ -7,6 +7,20 @@ from ..utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _strip_preamble(content: str) -> str:
+    """If the LLM response starts with conversational text before the
+    expected '## ' heading, drop the preamble. Returns content unchanged
+    when no preamble is present."""
+    if not content:
+        return content
+    idx = content.find("\n## ")
+    if idx == -1:
+        if content.lstrip().startswith("## "):
+            return content.lstrip()
+        return content  # No heading at all — leave unchanged
+    return content[idx + 1:]  # +1 to skip the leading newline
+
+
 @dataclass(frozen=True)
 class SectionInfo:
     title: str
@@ -57,7 +71,7 @@ Please confirm you're ready to begin and briefly acknowledge the writing style y
 
     def write_section(self, section: SectionInfo, sources: dict[str, Any]) -> str:
         prompt = self._build_section_prompt(section, sources)
-        content = self._conv.send(prompt)
+        content = _strip_preamble(self._conv.send(prompt))
         self._accepted.append(_AcceptedSection(title=section.title, content=content))
         with self._article_path.open("a", encoding="utf-8") as fh:
             fh.write(content + "\n\n")
@@ -73,7 +87,7 @@ Current version of this section:
 
 Rewrite the entire section incorporating the feedback. Start with ## {title}
 Maintain the same writing style and voice. Do not change other sections."""
-        return self._conv.send(prompt)
+        return _strip_preamble(self._conv.send(prompt))
 
     def accept_revision(self, title: str, revised_content: str) -> None:
         for s in self._accepted:

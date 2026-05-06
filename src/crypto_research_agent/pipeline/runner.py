@@ -13,6 +13,7 @@ from ..config import (
     get_model_for_role,
 )
 from ..feedback.outline_review import OutlineReview
+from ..feedback.prompts import safe_input
 from ..feedback.section_review import SectionReview
 from ..llm.api_backend import AnthropicAPIBackend
 from ..llm.claude_code import ClaudeCodeBackend
@@ -120,7 +121,8 @@ class PipelineRunner:
         print("  [2] Continue with Sonnet")
         print("  [3] Abort\n")
         while True:
-            choice = input("> ").strip()
+            # EOF (non-interactive stdin) → abort to avoid an infinite retry loop
+            choice = safe_input("> ", on_eof="3").strip()
             if choice == "1":
                 return "opus"
             if choice == "2":
@@ -195,12 +197,12 @@ Do not use generic AI writing patterns."""
     def _user_wants_to_continue_with_user_content() -> bool:
         print("\n[NOTICE] No relevant content from Substack or YouTube.")
         print("  [1] Abort   [2] Continue with your own materials")
-        return input("> ").strip() == "2"
+        return safe_input("> ").strip() == "2"
 
     @staticmethod
     def _user_wants_to_add_content() -> bool:
         print("\n[USER CONTENT] Add files to user_content/, then 'ready', or 'skip' to continue without.")
-        return input("> ").strip().lower() == "ready"
+        return safe_input("> ").strip().lower() == "ready"
 
     def _print_run_summary(self, ctx, router):
         print(self._stats.format_summary(query_label=ctx.output_dir.name))

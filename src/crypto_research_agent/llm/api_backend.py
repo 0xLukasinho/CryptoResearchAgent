@@ -5,6 +5,9 @@ import anthropic
 from .types import ClaudeResponse
 from .errors import AuthMissing, QuotaExceeded, TransientError, ClaudeCodeError
 from ._json import parse_json_loose
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class AnthropicAPIBackend:
@@ -67,4 +70,10 @@ class AnthropicAPIBackend:
             "No explanation, no markdown fences, no commentary. Just the raw JSON object."
         )
         response = self.complete(prompt=prompt, model=model, system_prompt=strict)
-        return parse_json_loose(response.text)
+        parsed = parse_json_loose(response.text)
+        if not parsed and response.text.strip():
+            logger.warning(
+                "complete_json: failed to parse response as JSON (model=%s); raw=%r",
+                model, response.text[:300],
+            )
+        return parsed

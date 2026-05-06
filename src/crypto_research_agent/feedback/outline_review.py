@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from .prompts import parse_feedback_input, render_review_prompt
+from .prompts import parse_feedback_input, render_review_prompt, safe_input
 
 
 class OutlineReview:
@@ -10,7 +10,8 @@ class OutlineReview:
         print(render_review_prompt(item_label="Outline", file_path=str(outline_path)))
         current = outline_path.read_text(encoding="utf-8")
         while True:
-            raw = input("> ")
+            # EOF → accept current outline, exit the loop cleanly
+            raw = safe_input("> ", on_eof="accept")
             fb = parse_feedback_input(raw)
             if fb["action"] == "accept":
                 return current

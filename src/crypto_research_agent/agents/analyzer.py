@@ -92,7 +92,10 @@ CRITICAL: First check if the content is in English.
             logger.info("Analyzing %d/%d: %s", i + 1, len(items), item.title)
             r = self.analyze(item, main_topic=main_topic, thesis=thesis)
             if r is None:
+                logger.info("  -> non-English, dropped")
                 continue
+            logger.info("  -> relevance=%s thesis=%s insights=%d",
+                        r.relevance_score, r.thesis_alignment, len(r.key_insights))
             analyzed.append(r)
             if test_mode and r.relevance_score in ("High", "Medium"):
                 relevant_count += 1

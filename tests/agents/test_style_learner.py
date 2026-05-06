@@ -32,7 +32,10 @@ def test_generate_style_card_parses_llm_json(tmp_path):
     }))
     learner = StyleLearner(backend, model="m",
                            samples_dir=tmp_path, instructions_file=tmp_path / "i.txt")
-    card = learner.generate_style_card({"samples": [], "instructions": ""})
+    # Pass non-empty samples so the empty-materials short-circuit doesn't trigger
+    card = learner.generate_style_card(
+        {"samples": [{"filename": "a.txt", "content": "Sample text."}], "instructions": ""}
+    )
     assert isinstance(card, StyleCard)
     assert card.tone == "analytical"
 
@@ -42,5 +45,18 @@ def test_generate_style_card_falls_back_on_garbage(tmp_path):
     backend.complete.return_value = MagicMock(text="not json at all")
     learner = StyleLearner(backend, model="m",
                            samples_dir=tmp_path, instructions_file=tmp_path / "i.txt")
+    card = learner.generate_style_card(
+        {"samples": [{"filename": "a.txt", "content": "Sample text."}], "instructions": ""}
+    )
+    assert card == StyleCard.fallback()
+
+
+def test_generate_style_card_short_circuits_when_no_materials(tmp_path):
+    """When no samples and no instructions are provided, skip the LLM call
+    and return the fallback directly."""
+    backend = MagicMock()
+    learner = StyleLearner(backend, model="m",
+                           samples_dir=tmp_path, instructions_file=tmp_path / "i.txt")
     card = learner.generate_style_card({"samples": [], "instructions": ""})
     assert card == StyleCard.fallback()
+    backend.complete.assert_not_called()

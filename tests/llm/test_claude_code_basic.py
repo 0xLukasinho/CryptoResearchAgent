@@ -45,6 +45,20 @@ def test_complete_builds_command_with_required_flags():
     assert response.output_tokens == 5
 
 
+def test_complete_passes_prompt_via_stdin_not_argv():
+    """Prompt is piped to claude via stdin, not appended as argv positional —
+    avoids Windows argv length limits + cmd.exe newline breakage."""
+    backend = ClaudeCodeBackend()
+    fake_stdout = {"result": "ok", "session_id": "s", "total_cost_usd": 0.0,
+                   "usage": {"input_tokens": 0, "output_tokens": 0}, "is_error": False}
+    with patch("subprocess.run", return_value=_mock_run(fake_stdout)) as mock_run:
+        backend.complete(prompt="LONG PROMPT TEXT", model="claude-haiku-4-5-20251001")
+    args = mock_run.call_args.args[0]
+    kwargs = mock_run.call_args.kwargs
+    assert "LONG PROMPT TEXT" not in args
+    assert kwargs.get("input") == "LONG PROMPT TEXT"
+
+
 def test_complete_omits_system_prompt_flag_when_empty():
     backend = ClaudeCodeBackend()
     fake_stdout = {"result": "hi", "session_id": "s", "total_cost_usd": 0.0,

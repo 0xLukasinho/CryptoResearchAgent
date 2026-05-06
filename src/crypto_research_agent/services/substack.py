@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import requests
 
 from ..utils.csv_loader import load_substack_urls
+from ..utils.html import html_to_text
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -142,11 +143,15 @@ class SubstackService:
             return None
         body = post.get_content() or ""
         description = meta.get("description") or ""
+        # Substack returns body as HTML — strip markup so Analyzer LLM can read
+        # content directly instead of wasting tokens on tags.
+        body_text = html_to_text(body)
+        description_text = html_to_text(description)
         return Article(
             title=meta.get("title", "Unknown Title"),
             author=meta.get("byline", "Unknown Author"),
             date=meta.get("post_date", ""),
-            text=f"{description}\n\n{body}".strip(),
+            text=f"{description_text}\n\n{body_text}".strip(),
             url=meta.get("canonical_url", post.url),
         )
 

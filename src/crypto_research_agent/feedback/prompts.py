@@ -9,6 +9,15 @@ class Feedback(TypedDict):
     details: str | None
 
 
+def safe_input(prompt: str = "> ", *, on_eof: str = "") -> str:
+    """Wrap input() so EOFError (closed stdin / non-interactive) returns
+    on_eof instead of crashing. Caller decides the safe-default value."""
+    try:
+        return input(prompt)
+    except EOFError:
+        return on_eof
+
+
 def parse_feedback_input(raw: str) -> Feedback:
     s = (raw or "").strip()
     if not s:

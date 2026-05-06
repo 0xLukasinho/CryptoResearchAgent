@@ -1,4 +1,4 @@
-from .prompts import parse_feedback_input, render_review_prompt
+from .prompts import parse_feedback_input, render_review_prompt, safe_input
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -11,7 +11,8 @@ class SectionReview:
                                     file_path=str(article_writer.article_path)))
         current = section_content
         while True:
-            raw = input("> ")
+            # EOF → accept current section, exit the loop cleanly
+            raw = safe_input("> ", on_eof="accept")
             fb = parse_feedback_input(raw)
             if fb["action"] == "accept":
                 return current

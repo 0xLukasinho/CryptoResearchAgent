@@ -10,6 +10,9 @@ from typing import Any
 from ._json import parse_json_loose
 from .errors import AuthMissing, ClaudeCodeError, QuotaExceeded, TransientError
 from .types import ClaudeResponse
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 QUOTA_PATTERNS = re.compile(r"(usage limit|quota exceeded|rate limit)", re.IGNORECASE)
@@ -93,14 +96,18 @@ class ClaudeCodeBackend:
                 raise
 
         try:
+            # Prompt is piped via stdin instead of passed as argv. This avoids:
+            #   (a) Windows command-line length limit (~32KB) when articles are large
+            #   (b) cmd.exe argv breakage on newlines / quotes when invoked via .cmd shim
             cmd = self._build_command(
                 model=model, sys_prompt_file=sys_prompt_file,
-                resume_session=resume_session, prompt=prompt,
+                resume_session=resume_session,
             )
             cmd[0] = self._resolve_executable()
             try:
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, encoding="utf-8",
+                    cmd, input=prompt,
+                    capture_output=True, text=True, encoding="utf-8",
                     timeout=self._timeout, check=False,
                 )
             except FileNotFoundError as e:
@@ -135,10 +142,16 @@ class ClaudeCodeBackend:
             "No explanation, no markdown fences, no commentary. Just the raw JSON object."
         )
         response = self.complete(prompt=prompt, model=model, system_prompt=strict)
-        return parse_json_loose(response.text)
+        parsed = parse_json_loose(response.text)
+        if not parsed and response.text.strip():
+            logger.warning(
+                "complete_json: failed to parse response as JSON (model=%s); raw=%r",
+                model, response.text[:300],
+            )
+        return parsed
 
     def _build_command(self, *, model: str, sys_prompt_file: str | None,
-                       resume_session: str | None, prompt: str) -> list[str]:
+                       resume_session: str | None) -> list[str]:
         cmd = [
             self._claude, "-p",
             "--output-format", "json",
@@ -149,7 +162,7 @@ class ClaudeCodeBackend:
             cmd.extend(["--append-system-prompt-file", sys_prompt_file])
         if resume_session:
             cmd.extend(["--resume", resume_session])
-        cmd.append(prompt)
+        # NB: prompt is NOT appended — it's piped via stdin in _invoke_once.
         return cmd
 
     def _raise_on_errors(self, result: subprocess.CompletedProcess) -> None:

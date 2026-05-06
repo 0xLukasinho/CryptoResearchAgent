@@ -42,11 +42,20 @@ class StyleLearner:
         return {"samples": samples, "instructions": instructions}
 
     def generate_style_card(self, materials: dict) -> StyleCard:
+        samples = materials.get("samples", [])
+        instructions = materials.get("instructions") or ""
+        if not samples and not instructions.strip():
+            logger.warning(
+                "No writing samples or instructions found in %s; using fallback "
+                "style card. Add .txt/.docx files to that directory to personalize "
+                "the writing voice.", self._samples_dir,
+            )
+            return StyleCard.fallback()
+
         samples_text = ""
-        for s in materials.get("samples", []):
+        for s in samples:
             content = truncate_to_token_limit(s.get("content", ""), self._model, 3000)
             samples_text += f"\n--- {s.get('filename', 'sample')} ---\n{content}\n"
-        instructions = materials.get("instructions") or ""
         instr_block = f"\nExplicit writing instructions from author:\n{instructions}" if instructions else ""
 
         prompt = f"""Analyze these writing samples and produce a style card capturing the author's voice precisely.

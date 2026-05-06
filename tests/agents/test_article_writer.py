@@ -40,6 +40,20 @@ def test_revise_section_does_not_append_to_file(tmp_path):
     assert "v1" in (tmp_path / "article.md").read_text(encoding="utf-8")
 
 
+def test_write_section_strips_llm_preamble(tmp_path):
+    """LLM may include chatty preamble before the heading; strip it so the
+    article file contains only proper sections."""
+    chatty = "Sure, let me write that section now.\n\n## Intro\n\nbody"
+    conv = _conv_returning("Acknowledged.", chatty)
+    aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
+    aw.start_article(title="T", outline="o", research_summary="s")
+    body = aw.write_section(SectionInfo(title="Intro", content="x"), sources={})
+    assert body.startswith("## Intro")
+    assert "let me write" not in body
+    file_text = (tmp_path / "article.md").read_text(encoding="utf-8")
+    assert "let me write" not in file_text
+
+
 def test_accept_revision_rewrites_file(tmp_path):
     conv = _conv_returning("Acknowledged.", "## Intro\n\nv1", "## Intro\n\nv2")
     aw = ArticleWriter(conv, output_path=tmp_path / "article.md")
