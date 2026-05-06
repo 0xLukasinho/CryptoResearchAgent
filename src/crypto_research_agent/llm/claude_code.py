@@ -1,12 +1,15 @@
-import subprocess
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from typing import Any
 
-from .types import ClaudeResponse
-from .errors import ClaudeCodeError, AuthMissing, QuotaExceeded, TransientError
 from ._json import parse_json_loose
+from .errors import AuthMissing, ClaudeCodeError, QuotaExceeded, TransientError
+from .types import ClaudeResponse
 
 
 QUOTA_PATTERNS = re.compile(r"(usage limit|quota exceeded|rate limit)", re.IGNORECASE)
@@ -23,9 +26,24 @@ class ClaudeCodeBackend:
                  max_retries: int = 2,
                  retry_base_delay: float = 1.0):
         self._claude = claude_executable
+        self._resolved_claude: str | None = None
         self._timeout = timeout
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
+
+    def _resolve_executable(self) -> str:
+        """Resolve `claude` to a full path via shutil.which (respects Windows
+        PATHEXT, so .cmd/.bat shims from npm-global installs are found)."""
+        if self._resolved_claude is not None:
+            return self._resolved_claude
+        resolved = shutil.which(self._claude)
+        if resolved is None:
+            raise AuthMissing(
+                f"Claude Code CLI ({self._claude!r}) not found on PATH. "
+                "Install from https://claude.com/download and run `claude setup-token`."
+            )
+        self._resolved_claude = resolved
+        return resolved
 
     def complete(
         self,
@@ -61,22 +79,45 @@ class ClaudeCodeBackend:
         system_prompt: str,
         resume_session: str | None,
     ) -> ClaudeResponse:
-        cmd = self._build_command(model=model, system_prompt=system_prompt,
-                                  resume_session=resume_session, prompt=prompt)
+        # System prompts can contain newlines, which break cmd.exe argv parsing
+        # when claude is installed as a .cmd shim (e.g. npm-global on Windows).
+        # Write to a temp file and use --append-system-prompt-file instead.
+        sys_prompt_file: str | None = None
+        if system_prompt and not resume_session:
+            fd, sys_prompt_file = tempfile.mkstemp(suffix=".txt", text=True)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(system_prompt)
+            except Exception:
+                os.close(fd) if fd else None
+                raise
+
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8",
-                timeout=self._timeout, check=False,
+            cmd = self._build_command(
+                model=model, sys_prompt_file=sys_prompt_file,
+                resume_session=resume_session, prompt=prompt,
             )
-        except FileNotFoundError as e:
-            raise AuthMissing(
-                "Claude Code CLI not found on PATH. Install from "
-                "https://claude.com/download and run `claude setup-token`."
-            ) from e
-        except subprocess.TimeoutExpired as e:
-            raise ClaudeCodeError(
-                f"`claude -p` timed out after {self._timeout}s"
-            ) from e
+            cmd[0] = self._resolve_executable()
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, encoding="utf-8",
+                    timeout=self._timeout, check=False,
+                )
+            except FileNotFoundError as e:
+                raise AuthMissing(
+                    "Claude Code CLI not found on PATH. Install from "
+                    "https://claude.com/download and run `claude setup-token`."
+                ) from e
+            except subprocess.TimeoutExpired as e:
+                raise ClaudeCodeError(
+                    f"`claude -p` timed out after {self._timeout}s"
+                ) from e
+        finally:
+            if sys_prompt_file:
+                try:
+                    os.unlink(sys_prompt_file)
+                except OSError:
+                    pass
 
         self._raise_on_errors(result)
         return self._parse_success(result.stdout)
@@ -96,16 +137,16 @@ class ClaudeCodeBackend:
         response = self.complete(prompt=prompt, model=model, system_prompt=strict)
         return parse_json_loose(response.text)
 
-    def _build_command(self, *, model: str, system_prompt: str,
+    def _build_command(self, *, model: str, sys_prompt_file: str | None,
                        resume_session: str | None, prompt: str) -> list[str]:
         cmd = [
-            self._claude, "-p", "--bare",
+            self._claude, "-p",
             "--output-format", "json",
-            "--allowedTools", "",
+            "--tools", "",
             "--model", model,
         ]
-        if system_prompt and not resume_session:
-            cmd.extend(["--append-system-prompt", system_prompt])
+        if sys_prompt_file and not resume_session:
+            cmd.extend(["--append-system-prompt-file", sys_prompt_file])
         if resume_session:
             cmd.extend(["--resume", resume_session])
         cmd.append(prompt)

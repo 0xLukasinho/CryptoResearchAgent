@@ -29,14 +29,14 @@ def test_complete_builds_command_with_required_flags():
         )
 
     args = mock_run.call_args.args[0]
-    assert args[0] == "claude"
+    # Path is resolved via shutil.which on Windows (.cmd shim) — accept any suffix
+    assert "claude" in args[0].lower()
     assert "-p" in args
-    assert "--bare" in args
     assert "--output-format" in args and "json" in args
-    assert "--allowedTools" in args
+    assert "--tools" in args
     assert "--model" in args
     assert "claude-haiku-4-5-20251001" in args
-    assert "--append-system-prompt" in args
+    assert "--append-system-prompt-file" in args
 
     assert response.text == "Hello, world!"
     assert response.session_id == "sess-1"
@@ -52,7 +52,7 @@ def test_complete_omits_system_prompt_flag_when_empty():
     with patch("subprocess.run", return_value=_mock_run(fake_stdout)) as mock_run:
         backend.complete(prompt="hi", model="claude-haiku-4-5-20251001")
     args = mock_run.call_args.args[0]
-    assert "--append-system-prompt" not in args
+    assert "--append-system-prompt-file" not in args
 
 
 def test_complete_passes_resume_flag_when_session_id_provided():
@@ -81,5 +81,5 @@ def test_complete_omits_system_prompt_flag_when_resuming_session():
             resume_session="sess-1",
         )
     args = mock_run.call_args.args[0]
-    assert "--append-system-prompt" not in args
+    assert "--append-system-prompt-file" not in args
     assert "--resume" in args and "sess-1" in args
