@@ -203,5 +203,4 @@ Do not use generic AI writing patterns."""
         return input("> ").strip().lower() == "ready"
 
     def _print_run_summary(self, ctx, router):
-        # Filled in Task G6
-        pass
+        print(self._stats.format_summary(query_label=ctx.output_dir.name))
