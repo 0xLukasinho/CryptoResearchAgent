@@ -1,0 +1,6 @@
+=== Run Summary: bitcoin_etf_2026-05-04_142301 ===
+Duration:           9m 0s
+Total calls:        3
+  Subscription:       2
+  API fallback:       1
+Approx. quota cost: $4.27 (would-be API equivalent)

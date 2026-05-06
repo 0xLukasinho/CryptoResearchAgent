@@ -1,0 +1,17 @@
+## Writing Style Guide
+
+**Tone:** analytical and informative
+**Sentence patterns:** short and punchy
+**Paragraph structure:** claim then evidence
+**Section openings:** bold assertions
+**Preferred transitions:** "That said,"
+**Vocabulary to use:** on-chain
+**Vocabulary to avoid:** massive
+
+## Example Excerpts from the Author's Writing
+
+> Excerpt 1.
+
+> Excerpt 2.
+
+Match this voice precisely. Every section you write — including rewrites — must sound like these excerpts.
