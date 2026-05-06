@@ -91,5 +91,8 @@ Focus on what makes this voice distinctive and reproducible."""
                 return StyleCard.from_dict(json.loads(match.group()))
             except json.JSONDecodeError:
                 pass
-        logger.warning("Failed to parse style card; using fallback")
+        logger.warning(
+            "Failed to parse style card; using fallback. Raw response (first 300 chars): %r",
+            (text or "")[:300],
+        )
         return StyleCard.fallback()
