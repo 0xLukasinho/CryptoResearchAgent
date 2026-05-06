@@ -91,8 +91,11 @@ Focus on what makes this voice distinctive and reproducible."""
                 return StyleCard.from_dict(json.loads(match.group()))
             except json.JSONDecodeError:
                 pass
+        # Truncate to a sane size but keep enough to diagnose markdown-fenced
+        # responses, chatty preambles, and mid-stream truncation
         logger.warning(
-            "Failed to parse style card; using fallback. Raw response (first 300 chars): %r",
-            (text or "")[:300],
+            "Failed to parse style card; using fallback. "
+            "Raw response (first 1500 chars of %d total): %r",
+            len(text or ""), (text or "")[:1500],
         )
         return StyleCard.fallback()
