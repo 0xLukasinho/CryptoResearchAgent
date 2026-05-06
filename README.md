@@ -22,7 +22,6 @@ A comprehensive multi-agent AI system that automates cryptocurrency research, co
   - [Analysis and Synthesis Phase](#analysis-and-synthesis-phase)
 - [Article Generation](#article-generation)
   - [Writing Style Personalization](#writing-style-personalization)
-  - [Fact Checking System](#fact-checking-system)
   - [Interactive Feedback Loop](#interactive-feedback-loop)
 - [User Content Integration](#user-content-integration)
   - [Supported File Types](#supported-file-types)
@@ -41,7 +40,6 @@ The system's core capabilities include:
 - Deep content analysis and relevance evaluation
 - AI-powered research outline generation
 - Full article creation with personalized writing style
-- Integrated fact-checking against source materials
 - Interactive feedback and revision processing
 
 ## Key Features
@@ -55,61 +53,75 @@ The system's core capabilities include:
 - **Age-Based Filtering**: Option to limit results to recent content only
 - **Personalized Writing**: Article generation matching your personal writing style
 - **Interactive Revision**: Real-time feedback and section-by-section article refinement
-- **Automated Fact Checking**: Verification of content accuracy against source materials
 - **Document Support**: Processing of various file formats including Word documents
 - **Social Media Integration**: Extraction and analysis of Twitter/X content
 
 ## System Architecture
 
-### Agent Components
+The codebase lives under `src/crypto_research_agent/` and is organized into layered components.
 
-The system employs 12 specialized agent components that work together:
+### Real Agents (`src/crypto_research_agent/agents/`)
 
-1. **Coordinator Agent**: Orchestrates the research workflow, plans approach strategies, and determines essential search terms
-2. **Database Search Agent**: Searches Substack databases to identify potential content sources
-3. **Article Retrieval Agent**: Fetches and processes articles from identified Substack sources
-4. **Analysis Agent**: Evaluates content relevance and extracts key insights
-5. **YouTube Agent**: Searches, retrieves transcripts, and analyzes YouTube content
-6. **Summarization Agent**: Creates concise, structured reports of analyzed content
-7. **Outline Generator Agent**: Builds coherent research outlines based on findings
-8. **Style Learning Agent**: Analyzes your writing samples to capture your personal style
-9. **Article Writer Agent**: Generates article sections following the outline, research data, and your style
-10. **Fact Checker Agent**: Verifies the factual accuracy of generated content
-11. **Feedback Processor**: Manages the interactive revision process for article sections
-12. **Cloud Convert Client**: Handles file format conversions for document processing
+1. **Coordinator**: Plans the search — determines `main_topic` and required terms from the query
+2. **Analyzer**: Evaluates each Article/Video for relevance, key insights, mentioned projects, thesis alignment; runs in batches with test-mode short-circuit
+3. **Summarizer**: Builds the markdown research summary from analyzed High/Medium relevance items
+4. **StyleLearner**: Loads writing samples (.txt/.docx) + instructions and generates a `StyleCard` capturing tone, vocabulary, transitions, example excerpts
+5. **OutlineWriter**: Generates and revises markdown research outlines, integrating user content when present
+6. **ArticleWriter**: Writes article sections one at a time via a stateful Conversation, supports per-section revision
 
-### Utility Modules
+### Services (`src/crypto_research_agent/services/`)
 
-Supporting the agents are specialized utility modules:
+- **SubstackService**: Discovers + fetches Substack posts with pagination and age filtering
+- **YouTubeService**: Channel discovery → playlist videos → Supadata transcripts; pure scoring/filter functions
+- **DocxExporter**: CloudConvert lifecycle for Markdown → DOCX
+- **TweetExtractor**: Playwright-driven tweet text extraction
+- **UserContentService**: txt/md/pdf/csv ingestion with per-type size limits
 
-- **CSV Handler**: Processes data files containing Substack and YouTube information
-- **Article Filter**: Filters content based on keyword matching and relevance
-- **Web Scraper**: Extracts content from web pages
-- **User Content Manager**: Integrates user-provided research materials
-- **Directory Setup**: Creates and manages file/folder structures
-- **Tweet Extractor**: Retrieves and processes content from Twitter/X
-- **Logger**: Centralized logging with rotating file output (`output/logs/agent.log`) and console output
-- **Token Utils**: Token-accurate content truncation using tiktoken
-- **Retry**: Exponential backoff decorator for Anthropic API rate limit and overload errors
+### Pipeline Stages (`src/crypto_research_agent/pipeline/`)
+
+- **DiscoveryStage**: Runs Substack/YouTube services, applies required-term pre-filter, then Analyzer
+- **SynthesisStage**: Saves research summary, generates outline, drives outline review loop
+- **WritingStage**: Persists style card, drives section-by-section writing + section review loop
+- **PipelineRunner**: Top-level orchestrator owning the LLMRouter and stage builders
+
+### LLM Layer (`src/crypto_research_agent/llm/`)
+
+- **ClaudeCodeBackend**: Subprocess wrapper around `claude -p` (subscription billing)
+- **AnthropicAPIBackend**: SDK-based fallback used on quota exhaustion
+- **LLMRouter**: One-time fallback switch on quota errors, with user prompt for Opus/Sonnet/abort
+- **Conversation**: Multi-turn wrapper using `--resume` session IDs for stateful article writing
+
+### Utilities (`src/crypto_research_agent/utils/`)
+
+- **logger**: Rotating file output (`output/logs/agent.log`) + console
+- **token_utils**: tiktoken-based content truncation at sentence boundaries
+- **filters**: Required-term and English-language pre-filters
+- **paths**: Slug sanitization + timestamped output dir builder
+- **outline_parser**: Parses markdown outlines into `{title, content}` sections
+- **csv_loader**: Typed loaders for Substack URLs and YouTube channel CSVs
 
 ### AI Services Integration
 
 The system leverages these AI services:
 
-- **Anthropic API**: Powers all 12 agents using Claude models
-  - `claude-haiku-4-5-20251001` — cost-efficient tasks: coordination, analysis, search, summarization, fact checking
-  - `claude-sonnet-4-6` — quality-critical tasks: article writing, style card generation, outline generation
+- **Claude (subscription)**: All LLM calls route through `claude -p` (the Claude Code CLI), billed against your Claude Max subscription
+  - `claude-haiku-4-5-20251001` — cost-efficient tasks: coordination, analysis, summarization
+  - `claude-opus-4-7` — quality-critical tasks: article writing, style card generation, outline generation
+- **Anthropic API (fallback)**: Activated only on quota exhaustion mid-run; you choose Opus/Sonnet/abort
 - **SupaData API**: Retrieves YouTube video transcripts
-- **CloudConvert API**: Handles document format conversions
+- **CloudConvert API**: Markdown → DOCX export
+- **YouTube Data API**: Channel/video discovery
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.7 or higher
-- Anthropic API key
+- Python 3.13 or higher
+- [Claude Code CLI](https://claude.com/claude-code) installed and authenticated (`claude setup-token`) — Claude Max subscription billing routes through this
 - SupaData API key (for YouTube transcript retrieval)
-- CloudConvert API key (for document processing)
+- CloudConvert API key (for DOCX export)
+- YouTube Data API key (for video discovery)
+- Anthropic API key — *optional* fallback when subscription quota is exhausted mid-run
 
 ### Setup Steps
 
@@ -119,35 +131,41 @@ The system leverages these AI services:
    cd crypto-research-agent
    ```
 
-2. Install required dependencies:
+2. Authenticate the Claude CLI for subscription billing:
    ```
-   pip install -r requirements.txt
+   claude setup-token
    ```
 
-3. Set up your environment file for API keys:
+3. Install the package in editable mode (uses `pyproject.toml`):
+   ```
+   pip install -e ".[dev]"
+   ```
+   This also registers a `crypto-research` console script.
+
+4. Set up your environment file:
    ```
    cp .env.template .env
    ```
-   Then edit `.env` to add your API keys.
+   Then edit `.env` to add the external API keys (Supadata, CloudConvert, YouTube). `ANTHROPIC_API_KEY` is optional — only needed if you want quota-fallback to the pay-per-token API.
 
-4. Prepare the content databases:
-   - Ensure `Substacks.csv` is in the input directory
-   - Ensure `YouTubes.csv` is in the input directory
+5. Prepare the content databases:
+   - Ensure `Substacks.csv` is in the `input/` directory
+   - Ensure `YouTubes.csv` is in the `input/` directory
    - Templates for both files are provided in the repo
 
 ## Usage Guide
 
 ### Basic Commands
 
-Run the agent with your research query:
+Run the agent with your research query (uses the `crypto-research` console script installed via `pip install -e ".[dev]"`):
 
 ```bash
-python main.py "Your crypto research query" 
+crypto-research "Your crypto research query"
 ```
 
 For example:
 ```bash
-python main.py "Bitcoin ETF inflows"
+crypto-research "Bitcoin ETF inflows"
 ```
 
 ### Command Line Arguments
@@ -237,16 +255,6 @@ The system learns your writing style and embeds it in every section it writes an
 
 4. **Stateful Conversation**: The Article Writer maintains a single conversation thread for the entire article. Each section and revision is added to the same thread, so the model always has full context of what it previously wrote — preventing style drift across sections and on revision.
 
-### Fact Checking System
-
-All generated content undergoes automatic fact checking:
-
-1. **Claim Identification**: Each section is analyzed for factual statements
-2. **Source Verification**: Claims are compared against research sources
-3. **Accuracy Assessment**: Discrepancies or unsupported claims are identified
-4. **Correction Application**: Any inaccuracies are automatically corrected
-5. **Verification Reporting**: Results of fact checking are reported
-
 ### Interactive Feedback Loop
 
 The system enables section-by-section feedback and revision:
@@ -332,31 +340,32 @@ The system generates these output files in a query-specific directory:
 
 **Test mode with YouTube only:**
 ```bash
-python main.py "Ethereum Layer 2 scaling" --test --youtube
+crypto-research "Ethereum Layer 2 scaling" --test --youtube
 ```
 
 **Search mode with Substacks only:**
 ```bash
-python main.py "DeFi yield farming" --search --substack
+crypto-research "DeFi yield farming" --search --substack
 ```
 
 **Full research with thesis direction:**
 ```bash
-python main.py "NFT market trends" --thesis "Focus on the relationship between NFT sales and overall crypto market conditions"
+crypto-research "NFT market trends" --thesis "Focus on the relationship between NFT sales and overall crypto market conditions"
 ```
 
 **Content age filtering:**
 ```bash
-python main.py "Crypto regulations" --max-age 30
+crypto-research "Crypto regulations" --max-age 30
 ```
 
 ## Troubleshooting
 
-- **API Key Issues**: Ensure `ANTHROPIC_API_KEY` and other keys are correctly set in your `.env` file
+- **`claude` CLI not found**: Install [Claude Code](https://claude.com/claude-code) and run `claude setup-token`. Verify with `claude -p "ping"`
+- **Subscription quota exhausted mid-run**: The pipeline will prompt you to continue via the Anthropic API (Opus/Sonnet) if `ANTHROPIC_API_KEY` is set, or abort
+- **External API key issues**: Ensure `SUPADATA_API_KEY`, `CLOUDCONVERT_API_KEY`, `YOUTUBE_API_KEY` are set in `.env`
 - **Content Database Problems**: Verify `Substacks.csv` and `YouTubes.csv` are properly formatted
-- **Style Learning Failures**: Check that writing samples are in the correct directory and format
-- **Rate Limit Errors**: The system automatically retries with exponential backoff — persistent failures indicate quota exhaustion
+- **Style Learning Failures**: Check that writing samples are in `input/writing_samples/` and are .txt or .docx
 - **Long Articles**: For articles with many sections, the stateful conversation grows with each section; if you hit context limits, reduce the number of outline sections
-- **Log Inspection**: Check `output/logs/agent.log` for detailed debug output from all agents
+- **Log Inspection**: Check `output/logs/agent.log` for detailed debug output
 
 If you encounter persistent issues, check the console output for specific error messages or review the project documentation for updates.
