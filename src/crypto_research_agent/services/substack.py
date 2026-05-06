@@ -104,10 +104,21 @@ class SubstackService:
         """Yield articles across all configured Substacks."""
         articles_per_substack = 10 if test_mode else 200
         max_substacks = 30 if test_mode else len(self._urls)
-        for url in self._urls[:max_substacks]:
-            yield from self.fetch_posts(url, max_articles=articles_per_substack,
+        total = min(max_substacks, len(self._urls))
+        mode_label = "TEST" if test_mode else "FULL"
+        logger.info(
+            "Discovery starting (%s mode): iterating %d/%d substacks, "
+            "max %d articles per substack",
+            mode_label, total, len(self._urls), articles_per_substack,
+        )
+        for i, url in enumerate(self._urls[:max_substacks], start=1):
+            logger.info("[%d/%d] %s", i, total, url)
+            articles = self.fetch_posts(url, max_articles=articles_per_substack,
                                          max_age_days=max_age_days)
+            logger.info("  -> %d articles fetched (after age filter)", len(articles))
+            yield from articles
             time.sleep(self._delay)
+        logger.info("Discovery complete: walked %d substacks", total)
 
     def fetch_posts(self, newsletter_url: str, *, max_articles: int,
                      max_age_days: int | None) -> list[Article]:
