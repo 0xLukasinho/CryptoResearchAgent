@@ -1,0 +1,10 @@
+[
+  {"main_topic": "Bitcoin ETF", "required_terms": ["bitcoin", "etf"]},
+  {"relevance_score": "High", "key_insights": ["i1"], "mentioned_projects": ["Bitcoin"], "thesis_alignment": "Not Applicable"},
+  "# Research Results\nbody",
+  "# Outline\n## 1. Intro\n- bullet\n## 2. Body\n- bullet\n",
+  {"tone": "analytical", "sentence_patterns": "short", "vocabulary": {"preferred": [], "avoided": []}, "paragraph_structure": "p", "section_openings": "s", "transitions": [], "example_excerpts": ["e"]},
+  "Acknowledged.",
+  "## 1. Intro\n\nBody one.",
+  "## 2. Body\n\nBody two."
+]
