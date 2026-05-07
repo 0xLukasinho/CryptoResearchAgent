@@ -43,20 +43,7 @@ class Analyzer:
     def analyze(self, item: Article | Video,
                 *, main_topic: str, thesis: str | None) -> AnalyzedItem | None:
         text_sample = truncate_to_token_limit(self._extract_text(item), self._model, 1500)
-        thesis_info = f"\nThesis Direction: {thesis}" if thesis else ""
-        prompt = f"""Analyze this crypto content for relevance.
-
-Search Topic: {main_topic}{thesis_info}
-
-Content:
-Title: {item.title}
-{text_sample}
-
-CRITICAL: First check if the content is in English.
-- If NOT in English, return: {{"non_english": true, "language_detected": "..."}}
-- If in English, return JSON with: relevance_score (High/Medium/Low),
-  relevance_explanation, key_insights (list), mentioned_projects (list),
-  thesis_alignment (High/Medium/Low/Not Applicable), thesis_alignment_explanation."""
+        prompt = self._build_prompt(item, text_sample, main_topic, thesis)
 
         # Per-article fault isolation: a single failed/timed-out LLM call must
         # not abort the batch. Quota/Auth errors still bubble up so the router
@@ -135,6 +122,68 @@ Return JSON with: key_insights (list of strings), mentioned_projects (list of st
             result.get("key_insights", []),
             result.get("mentioned_projects", []),
         )
+
+    @staticmethod
+    def _build_prompt(item, text_sample: str, main_topic: str,
+                      thesis: str | None) -> str:
+        """Build a strict relevance prompt that forces the model to count
+        paragraphs focused on the topic before scoring. The default for
+        ambiguous cases is Low — the goal is to filter, not to be generous."""
+        scoring_block = (
+            Analyzer._SCORING_WITH_THESIS.format(main_topic=main_topic, thesis=thesis)
+            if thesis else
+            Analyzer._SCORING_NO_THESIS.format(main_topic=main_topic)
+        )
+        return f"""You are evaluating whether a research article is RELEVANT to a search topic. Be a STRICT judge — the goal is to surface articles that genuinely help research this topic, not articles that merely mention it.
+
+SEARCH TOPIC: {main_topic}
+{f'THESIS: {thesis}' if thesis else ''}
+
+ARTICLE:
+Title: {item.title}
+
+{text_sample}
+
+---
+STEP 1 — Read the article carefully and answer to yourself:
+  - What is this article ACTUALLY about? (one sentence)
+  - How many paragraphs FOCUS on {main_topic} — meaning they develop, analyze,
+    debate, or argue about the topic, not just mention it in passing?
+  - How many total body paragraphs does the article have?
+
+STEP 2 — Apply this scoring rubric:
+{scoring_block}
+
+STEP 3 — Return ONE JSON object with these fields (no prose, no markdown fences):
+{{
+  "relevance_score": "High" | "Medium" | "Low",
+  "relevance_explanation": "<one sentence: what is the article actually about, and why this score given the focus assessment>",
+  "topic_paragraphs": <integer: paragraphs focused on the topic>,
+  "total_paragraphs": <integer: total body paragraphs in the article>,
+  "key_insights": [<3-7 concrete claims or findings from the article — not topic summaries>],
+  "mentioned_projects": [<crypto projects/protocols mentioned by name>],
+  "thesis_alignment": "High" | "Medium" | "Low" | "Not Applicable",
+  "thesis_alignment_explanation": "<one sentence, or empty string if no thesis>"
+}}
+
+If the article is NOT primarily in English, instead return:
+{{"non_english": true, "language_detected": "<language>"}}"""
+
+    _SCORING_NO_THESIS = """- HIGH: The article is PRIMARILY ABOUT {main_topic}. The topic appears in the title and/or is the developed subject of multiple paragraphs (typically 4+ dedicated paragraphs, OR ≥40% of the body's paragraphs).
+- MEDIUM: {main_topic} is a SUBSTANTIVE recurring thread (2-3 dedicated paragraphs, or one of several major themes) but the article is fundamentally about a broader/different subject.
+- LOW: {main_topic} is mentioned in passing — a single paragraph, a supporting example, or a list-item — and the article is fundamentally about something else.
+
+DEFAULT TO LOW WHEN UNCERTAIN. Mentioning the topic is not enough. Strict judges produce useful research."""
+
+    _SCORING_WITH_THESIS = """The thesis is: "{thesis}"
+
+Score the article's USEFULNESS to a researcher arguing or investigating this thesis:
+
+- HIGH: The article directly TESTS, SUPPORTS, CONTRADICTS, or substantively ANALYZES the thesis. A researcher would cite this article when making an argument about the thesis.
+- MEDIUM: The article touches on dynamics, signals, or context that inform the thesis without being directly about it. Useful as supporting evidence or background.
+- LOW: The article is largely unrelated to the thesis, even if it mentions {main_topic} in passing.
+
+CRITICAL: when a thesis is provided, thesis-fit takes precedence over topic-mention frequency. An article that mentions {main_topic} 10 times but doesn't connect to the thesis is LOW. Default to LOW when uncertain."""
 
     @staticmethod
     def _extract_text(item) -> str:
