@@ -34,6 +34,8 @@ output/
 input/*.csv  # Exclude all CSV data files
 input/Substacks.csv  # Explicitly exclude Substacks.csv
 input/YouTubes.csv  # Explicitly exclude YouTubes.csv
+input/Substacks.csv.bak*  # Backup copies of the curated Substack list
+input/Substacks_review.xlsx  # XLSX review export (same data as Substacks.csv)
 
 # Writing samples directory - Only include the README.txt file
 input/writing_samples/*  # Exclude all files in the directory
