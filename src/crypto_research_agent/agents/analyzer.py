@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
+from ..llm.errors import AuthMissing, QuotaExceeded
 from ..services.substack import Article
 from ..services.youtube import Video
 from ..utils.logger import get_logger
@@ -57,10 +58,25 @@ CRITICAL: First check if the content is in English.
   relevance_explanation, key_insights (list), mentioned_projects (list),
   thesis_alignment (High/Medium/Low/Not Applicable), thesis_alignment_explanation."""
 
-        result = self._backend.complete_json(
-            prompt=prompt, model=self._model,
-            system_prompt="You evaluate crypto content. Respond with valid JSON only.",
-        )
+        # Per-article fault isolation: a single failed/timed-out LLM call must
+        # not abort the batch. Quota/Auth errors still bubble up so the router
+        # can switch to fallback or surface a config issue.
+        try:
+            result = self._backend.complete_json(
+                prompt=prompt, model=self._model,
+                system_prompt="You evaluate crypto content. Respond with valid JSON only.",
+            )
+        except (QuotaExceeded, AuthMissing):
+            raise
+        except Exception as e:
+            logger.warning("Analyzer LLM call failed for %r; skipping. (%s: %s)",
+                           item.title, type(e).__name__, e)
+            return AnalyzedItem(
+                title=item.title, author=getattr(item, "author", getattr(item, "channel", "")),
+                date=item.date, url=item.url, text=self._extract_text(item),
+                relevance_score="Error",
+                relevance_explanation=f"LLM call failed: {type(e).__name__}",
+            )
         if not result:
             return AnalyzedItem(
                 title=item.title, author=getattr(item, "author", getattr(item, "channel", "")),
