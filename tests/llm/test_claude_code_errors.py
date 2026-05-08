@@ -78,3 +78,52 @@ def test_other_nonzero_exit_is_transient():
     with patch("subprocess.run", return_value=_mock_run(returncode=2, stderr="network blip")):
         with pytest.raises(TransientError):
             backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
+
+
+def test_overload_529_classified_as_transient():
+    """Anthropic 529 / overload errors must be retryable. Otherwise a
+    single capacity hiccup kills the whole pipeline."""
+    backend = ClaudeCodeBackend(max_retries=0)  # don't actually wait/retry
+    body = json.dumps({
+        "is_error": True,
+        "result": "API Error: Repeated 529 Overloaded errors. The API is at capacity.",
+    })
+    with patch("subprocess.run", return_value=_mock_run(stdout=body, returncode=0)):
+        with pytest.raises(TransientError, match="529|Overload|Transient"):
+            backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
+
+
+def test_503_temporarily_unavailable_classified_as_transient():
+    backend = ClaudeCodeBackend(max_retries=0)
+    body = json.dumps({"is_error": True, "result": "503 Service Temporarily Unavailable"})
+    with patch("subprocess.run", return_value=_mock_run(stdout=body, returncode=0)):
+        with pytest.raises(TransientError):
+            backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
+
+
+def test_opus_model_includes_sonnet_fallback_flag():
+    """Opus calls get --fallback-model claude-sonnet-4-6 so claude -p can
+    auto-failover to Sonnet when Opus is over capacity."""
+    backend = ClaudeCodeBackend()
+    ok = json.dumps({
+        "result": "ok", "session_id": "s", "total_cost_usd": 0.0,
+        "usage": {"input_tokens": 0, "output_tokens": 0}, "is_error": False,
+    })
+    with patch("subprocess.run", return_value=_mock_run(stdout=ok)) as mock_run:
+        backend.complete(prompt="x", model="claude-opus-4-7")
+    args = mock_run.call_args.args[0]
+    assert "--fallback-model" in args
+    assert args[args.index("--fallback-model") + 1] == "claude-sonnet-4-6"
+
+
+def test_haiku_model_skips_fallback_flag():
+    """Haiku is already lightweight — no fallback flag needed."""
+    backend = ClaudeCodeBackend()
+    ok = json.dumps({
+        "result": "ok", "session_id": "s", "total_cost_usd": 0.0,
+        "usage": {"input_tokens": 0, "output_tokens": 0}, "is_error": False,
+    })
+    with patch("subprocess.run", return_value=_mock_run(stdout=ok)) as mock_run:
+        backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
+    args = mock_run.call_args.args[0]
+    assert "--fallback-model" not in args

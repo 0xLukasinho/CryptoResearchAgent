@@ -17,6 +17,16 @@ logger = get_logger(__name__)
 
 QUOTA_PATTERNS = re.compile(r"(usage limit|quota exceeded|rate limit)", re.IGNORECASE)
 AUTH_PATTERNS = re.compile(r"(not authenticated|setup-token|unauthorized)", re.IGNORECASE)
+# Anthropic infra is sometimes capacity-constrained — these are RETRYABLE.
+# claude -p reports them as JSON `is_error: true` with a result message like
+# "API Error: Repeated 529 Overloaded errors. The API is at capacity..." or
+# 503/504/timeout text. Classify as TransientError so the retry loop kicks in.
+TRANSIENT_PATTERNS = re.compile(
+    r"(529|overload|capacity|503|504|temporarily unavailable|"
+    r"timed?\s*out|connection reset|connection refused|"
+    r"server error|internal error|bad gateway|gateway timeout)",
+    re.IGNORECASE,
+)
 
 
 class ClaudeCodeBackend:
@@ -158,6 +168,11 @@ class ClaudeCodeBackend:
             "--tools", "",
             "--model", model,
         ]
+        # When primary is Opus and Anthropic infra is over capacity, claude -p
+        # supports auto-fallback to a cheaper model rather than failing the
+        # whole call. We point Opus at Sonnet so a 529 doesn't break the run.
+        if model.startswith("claude-opus"):
+            cmd.extend(["--fallback-model", "claude-sonnet-4-6"])
         if sys_prompt_file and not resume_session:
             cmd.extend(["--append-system-prompt-file", sys_prompt_file])
         if resume_session:
@@ -180,6 +195,8 @@ class ClaudeCodeBackend:
                             f"Claude Code is not authenticated. "
                             f"Run `claude setup-token` or `claude login`. ({msg})"
                         )
+                    if TRANSIENT_PATTERNS.search(msg):
+                        raise TransientError(f"Transient API error: {msg}")
                     raise ClaudeCodeError(f"Claude returned error: {msg}")
             except json.JSONDecodeError as e:
                 if result.returncode == 0:
@@ -198,6 +215,8 @@ class ClaudeCodeBackend:
                 f"Claude Code is not authenticated. "
                 f"Run `claude setup-token` or `claude login`. ({stderr.strip()})"
             )
+        # Default for non-zero exits without specific patterns: transient.
+        # The retry loop will attempt up to max_retries more times.
         raise TransientError(
             f"`claude -p` failed (exit {result.returncode}): {stderr.strip() or '<no stderr>'}"
         )
