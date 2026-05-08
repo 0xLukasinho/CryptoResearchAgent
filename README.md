@@ -1,371 +1,497 @@
 # Crypto Research Agent System
 
-A comprehensive multi-agent AI system that automates cryptocurrency research, content analysis, and article generation using a coordinated network of specialized intelligent agents.
+An automated research-and-writing pipeline that walks a curated list of Substack newsletters and YouTube channels, picks articles relevant to your topic and thesis, and produces a publication-ready Markdown + DOCX article in your personal writing voice. All LLM calls bill against your **Claude Max subscription** (no per-token API costs), and every step has interactive feedback so you can revise outline and section content before it's written to disk.
 
 ## Table of Contents
 
-- [System Overview](#system-overview)
-- [Key Features](#key-features)
-- [System Architecture](#system-architecture)
-  - [Agent Components](#agent-components)
-  - [Utility Modules](#utility-modules)
-  - [AI Services Integration](#ai-services-integration)
+- [What it does](#what-it-does)
+- [Quick Start (5 minutes)](#quick-start-5-minutes)
+- [Authentication and Billing — IMPORTANT](#authentication-and-billing--important)
 - [Installation](#installation)
-  - [Prerequisites](#prerequisites)
-  - [Setup Steps](#setup-steps)
-- [Usage Guide](#usage-guide)
-  - [Basic Commands](#basic-commands)
-  - [Command Line Arguments](#command-line-arguments)
-  - [Operational Modes](#operational-modes)
-- [Research Workflow](#research-workflow)
-  - [Content Discovery Phase](#content-discovery-phase)
-  - [Analysis and Synthesis Phase](#analysis-and-synthesis-phase)
-- [Article Generation](#article-generation)
-  - [Writing Style Personalization](#writing-style-personalization)
-  - [Interactive Feedback Loop](#interactive-feedback-loop)
-- [User Content Integration](#user-content-integration)
-  - [Supported File Types](#supported-file-types)
-  - [Tweet Integration](#tweet-integration)
-- [Output Files](#output-files)
-- [Usage Examples](#usage-examples)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [How a run works](#how-a-run-works)
+- [Interactive feedback flow](#interactive-feedback-flow)
+- [Strict relevance scoring](#strict-relevance-scoring)
+- [Writing style personalization](#writing-style-personalization)
+- [User content integration](#user-content-integration)
+- [Output files](#output-files)
+- [System Architecture](#system-architecture)
 - [Troubleshooting](#troubleshooting)
 
-## System Overview
+## What it does
 
-The Crypto Research Agent System is designed to automate the entire workflow of researching cryptocurrency topics, from initial information gathering to creating publication-ready articles. It employs multiple specialized AI agents working in coordination to search through hundreds of resources, identify relevant content, analyze findings, and generate comprehensive research materials that match your personal writing style.
+Given a query (e.g. `"Bitcoin ETF"`) and optionally a thesis, the system:
 
-The system's core capabilities include:
+1. Plans search terms via Claude
+2. Walks every Substack in `input/Substacks.csv` and every YouTube channel in `input/YouTubes.csv`
+3. Pre-filters articles/videos by required keywords; analyzes survivors with Claude using a strict paragraph-focus rubric (so articles that only *mention* the topic don't pass)
+4. Optionally pulls in your own research notes / PDFs / CSVs from a `user_content/` directory
+5. Generates a research summary + outline; you can revise both interactively
+6. Learns your writing voice from samples in `input/writing_samples/` and produces a style card
+7. Writes the article section-by-section in your voice; you can revise or manually edit each section before moving on
+8. Exports to DOCX via CloudConvert
 
-- Automated information discovery across Substacks, YouTube, and user-provided materials
-- Deep content analysis and relevance evaluation
-- AI-powered research outline generation
-- Full article creation with personalized writing style
-- Interactive feedback and revision processing
+## Quick Start (5 minutes)
 
-## Key Features
+For Windows PowerShell. Adapt commands as needed for macOS/Linux.
 
-- **Multi-Source Research**: Comprehensive search across Substack newsletters and YouTube videos
-- **Content Filtering**: Efficient pre-filtering using required keywords to optimize processing
-- **Deep Analysis**: Advanced content relevance evaluation and key insight extraction
-- **User Content Integration**: Seamless incorporation of your own research materials
-- **Thesis Direction**: Specification of research focus for targeted outcomes
-- **Flexible Execution Modes**: Multiple operational modes (full research, search-only, test)
-- **Age-Based Filtering**: Option to limit results to recent content only
-- **Personalized Writing**: Article generation matching your personal writing style
-- **Interactive Revision**: Real-time feedback and section-by-section article refinement
-- **Document Support**: Processing of various file formats including Word documents
-- **Social Media Integration**: Extraction and analysis of Twitter/X content
+```powershell
+# 1. Clone
+git clone https://github.com/0xLukasinho/CryptoResearchAgent.git
+cd CryptoResearchAgent
 
-## System Architecture
+# 2. Make sure Python 3.13+ is available (3.14 works too)
+py -3.14 --version
 
-The codebase lives under `src/crypto_research_agent/` and is organized into layered components.
+# 3. Authenticate Claude for subscription billing — see "Auth and Billing" below
+claude setup-token
+# Copy the token it prints, then:
+[Environment]::SetEnvironmentVariable("CLAUDE_CODE_OAUTH_TOKEN", "<token>", "User")
+[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", $null, "User")
+# Open a NEW PowerShell window so the new env vars take effect.
 
-### Real Agents (`src/crypto_research_agent/agents/`)
+# 4. Install (we use pipx so the CLI lives globally without needing venv activation)
+py -3.14 -m pip install --user pipx
+py -3.14 -m pipx ensurepath
+# Open a NEW PowerShell window so pipx is on PATH.
+pipx install -e C:\path\to\CryptoResearchAgent
 
-1. **Coordinator**: Plans the search — determines `main_topic` and required terms from the query
-2. **Analyzer**: Evaluates each Article/Video for relevance, key insights, mentioned projects, thesis alignment; runs in batches with test-mode short-circuit
-3. **Summarizer**: Builds the markdown research summary from analyzed High/Medium relevance items
-4. **StyleLearner**: Loads writing samples (.txt/.docx) + instructions and generates a `StyleCard` capturing tone, vocabulary, transitions, example excerpts
-5. **OutlineWriter**: Generates and revises markdown research outlines, integrating user content when present
-6. **ArticleWriter**: Writes article sections one at a time via a stateful Conversation, supports per-section revision
+# 5. Configure non-Claude API keys
+cp .env.template .env
+# Edit .env, fill in SUPADATA_API_KEY, CLOUDCONVERT_API_KEY, YOUTUBE_API_KEY.
+# Do NOT set ANTHROPIC_API_KEY in .env (see warning below).
 
-### Services (`src/crypto_research_agent/services/`)
+# 6. Provide writing samples (optional but recommended)
+# Drop 1-3 .docx or .txt files into input/writing_samples/
+# These define your voice — without them the article comes out generic.
 
-- **SubstackService**: Discovers + fetches Substack posts with pagination and age filtering
-- **YouTubeService**: Channel discovery → playlist videos → Supadata transcripts; pure scoring/filter functions
-- **DocxExporter**: CloudConvert lifecycle for Markdown → DOCX
-- **TweetExtractor**: Playwright-driven tweet text extraction
-- **UserContentService**: txt/md/pdf/csv ingestion with per-type size limits
+# 7. Run a quick test
+crypto-research "Bitcoin ETF" --test --substack --max-age 30
+```
 
-### Pipeline Stages (`src/crypto_research_agent/pipeline/`)
+A `--test` run produces a real article via Haiku, finishes in ~5-10 min, and bills against your subscription (no per-token cost).
 
-- **DiscoveryStage**: Runs Substack/YouTube services, applies required-term pre-filter, then Analyzer
-- **SynthesisStage**: Saves research summary, generates outline, drives outline review loop
-- **WritingStage**: Persists style card, drives section-by-section writing + section review loop
-- **PipelineRunner**: Top-level orchestrator owning the LLMRouter and stage builders
+## Authentication and Billing — IMPORTANT
 
-### LLM Layer (`src/crypto_research_agent/llm/`)
+The pipeline routes every LLM call through `claude -p` (the Claude Code CLI), which can authenticate two ways:
 
-- **ClaudeCodeBackend**: Subprocess wrapper around `claude -p` (subscription billing)
-- **AnthropicAPIBackend**: SDK-based fallback used on quota exhaustion
-- **LLMRouter**: One-time fallback switch on quota errors, with user prompt for Opus/Sonnet/abort
-- **Conversation**: Multi-turn wrapper using `--resume` session IDs for stateful article writing
+| Method | Billing | Setup |
+|---|---|---|
+| **OAuth token** (`CLAUDE_CODE_OAUTH_TOKEN`) | Claude Max subscription (flat-rate against your plan) | `claude setup-token` |
+| **API key** (`ANTHROPIC_API_KEY`) | Pay-per-token via Anthropic API | Set env var |
 
-### Utilities (`src/crypto_research_agent/utils/`)
+### ⚠️ DO NOT set `ANTHROPIC_API_KEY`
 
-- **logger**: Rotating file output (`output/logs/agent.log`) + console
-- **token_utils**: tiktoken-based content truncation at sentence boundaries
-- **filters**: Required-term and English-language pre-filters
-- **paths**: Slug sanitization + timestamped output dir builder
-- **outline_parser**: Parses markdown outlines into `{title, content}` sections
-- **csv_loader**: Typed loaders for Substack URLs and YouTube channel CSVs
+If `ANTHROPIC_API_KEY` is present in the environment, **`claude -p` prefers it over OAuth and silently routes every call through the API** — even when you have an active Claude Max subscription. This will burn pay-per-token API credits, not your subscription.
 
-### AI Services Integration
+The pipeline goes to several lengths to prevent this:
 
-The system leverages these AI services:
+1. `config.py` does not load `ANTHROPIC_API_KEY` at all
+2. `PipelineRunner` does not wire any API fallback
+3. `ClaudeCodeBackend` strips `ANTHROPIC_API_KEY` from the subprocess environment before invoking `claude -p` (defense in depth)
 
-- **Claude (subscription)**: All LLM calls route through `claude -p` (the Claude Code CLI), billed against your Claude Max subscription
-  - `claude-haiku-4-5-20251001` — cost-efficient tasks: coordination, analysis, summarization
-  - `claude-opus-4-7` — quality-critical tasks: article writing, style card generation, outline generation
-- **Anthropic API (fallback)**: Activated only on quota exhaustion mid-run; you choose Opus/Sonnet/abort
-- **SupaData API**: Retrieves YouTube video transcripts
-- **CloudConvert API**: Markdown → DOCX export
-- **YouTube Data API**: Channel/video discovery
+But the safest state is: **don't have `ANTHROPIC_API_KEY` set anywhere**. Specifically:
+
+```powershell
+# Check Windows User-level env vars
+[Environment]::GetEnvironmentVariable("ANTHROPIC_API_KEY", "User")    # should print nothing
+[Environment]::GetEnvironmentVariable("ANTHROPIC_API_KEY", "Machine") # should print nothing
+
+# If either prints a value, clear it:
+[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", $null, "User")
+# (And same for "Machine" if you have admin rights)
+```
+
+Also leave `ANTHROPIC_API_KEY` blank or absent in `.env`.
+
+### Setting up the OAuth token
+
+```powershell
+claude setup-token
+```
+
+This opens a browser. Log in with the Anthropic account that has your Claude Max subscription. The CLI prints a long-lived OAuth token (`sk-ant-oat01-...`).
+
+On Windows the token is **NOT auto-stored** in keychain. You need to set it as an env var:
+
+```powershell
+# Persistent across reboots, available to all apps you launch (incl. Python subprocess)
+[Environment]::SetEnvironmentVariable("CLAUDE_CODE_OAUTH_TOKEN", "<paste token>", "User")
+```
+
+Open a **new** PowerShell window for the env var to take effect.
+
+### Verifying it works
+
+```
+claude -p "say pong" --model claude-haiku-4-5-20251001 --output-format json
+```
+
+If it returns JSON with `"result": "pong"`, OAuth/subscription is working. If it asks you to run setup-token, the env var didn't take effect — open a fresh PowerShell window.
+
+> Note: the JSON output will include a `total_cost_usd` field with a non-zero number. **This is misleading — it's a token-cost estimate, not your actual bill.** Subscription billing is flat-rate; that field is computed regardless of which auth path was used.
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.13 or higher
-- [Claude Code CLI](https://claude.com/claude-code) installed and authenticated (`claude setup-token`) — Claude Max subscription billing routes through this
-- SupaData API key (for YouTube transcript retrieval)
-- CloudConvert API key (for DOCX export)
-- YouTube Data API key (for video discovery)
-- Anthropic API key — *optional* fallback when subscription quota is exhausted mid-run
+- **Python 3.13 or higher** (3.14 works)
+- **Claude Code CLI** ([install link](https://claude.com/claude-code))
+- An active **Claude Max subscription** (not Claude Free)
+- **Supadata API key** — for YouTube transcripts ([supadata.ai](https://supadata.ai))
+- **CloudConvert API key** — for DOCX export ([cloudconvert.com](https://cloudconvert.com))
+- **YouTube Data API key** — for video discovery ([Google Cloud Console](https://console.cloud.google.com/apis/credentials))
+- **DO NOT** need an Anthropic API key
 
-### Setup Steps
+### Setup steps
 
-1. Clone this repository:
-   ```
-   git clone https://github.com/yourusername/crypto-research-agent.git
-   cd crypto-research-agent
-   ```
-
-2. Authenticate the Claude CLI for subscription billing:
-   ```
-   claude setup-token
+1. **Clone**
+   ```bash
+   git clone https://github.com/0xLukasinho/CryptoResearchAgent.git
+   cd CryptoResearchAgent
    ```
 
-3. Install the package in editable mode (uses `pyproject.toml`):
+2. **Set up Claude OAuth** — see [Authentication and Billing](#authentication-and-billing--important) above.
+
+3. **Install** via pipx (recommended — `crypto-research` becomes a global command):
+   ```powershell
+   py -3.14 -m pip install --user pipx
+   py -3.14 -m pipx ensurepath
+   pipx install -e .
    ```
+   Or via pip if you'd rather develop in a venv:
+   ```bash
    pip install -e ".[dev]"
    ```
-   This also registers a `crypto-research` console script.
 
-4. Set up your environment file:
-   ```
+4. **Configure external API keys**
+   ```bash
    cp .env.template .env
    ```
-   Then edit `.env` to add the external API keys (Supadata, CloudConvert, YouTube). `ANTHROPIC_API_KEY` is optional — only needed if you want quota-fallback to the pay-per-token API.
+   Then edit `.env`:
+   ```
+   SUPADATA_API_KEY=...
+   CLOUDCONVERT_API_KEY=...
+   YOUTUBE_API_KEY=...
+   ```
+   Leave any reference to `ANTHROPIC_API_KEY` blank or remove the line entirely.
 
-5. Prepare the content databases:
-   - Ensure `Substacks.csv` is in the `input/` directory
-   - Ensure `YouTubes.csv` is in the `input/` directory
-   - Templates for both files are provided in the repo
+5. **Prepare data sources**
+   - `input/Substacks.csv` — curated list of newsletters (template provided)
+   - `input/YouTubes.csv` — curated list of channels (template provided)
+   - `input/writing_samples/` — drop 1-3 `.docx` or `.txt` files of your own writing (optional, but recommended)
+   - `input/writing_instructions.txt` — optional notes on style preferences
 
-## Usage Guide
+## Configuration
 
-### Basic Commands
+### `Substacks.csv`
 
-Run the agent with your research query (uses the `crypto-research` console script installed via `pip install -e ".[dev]"`):
+Format: `Name,by,Substack URL,X URL,Status`. Use full root URLs (`https://example.substack.com`). Custom domains work. The pipeline auto-strips paths during normalization.
+
+A bundled `scripts/check_substacks.py` lets you audit the list for dead URLs:
 
 ```bash
-crypto-research "Your crypto research query"
+python scripts/check_substacks.py
 ```
 
-For example:
+It writes a cleaned CSV (404s removed, 403s moved to bottom marked PRIVATE) and a colored XLSX for review.
+
+### `YouTubes.csv`
+
+Format: `Name,Channel ID,YouTube URL`. Channel ID must start with `UC` (the YouTube Data API channel-ID format).
+
+### Writing samples
+
+Place 1-3 representative pieces of your own writing in `input/writing_samples/`. Supported formats: `.txt`, `.docx`. The `StyleLearner` reads these once per run and asks Claude to extract a style card (tone, vocabulary, sentence patterns, transitions, example excerpts).
+
+If the directory is empty, the system falls back to a generic "analytical and informative" style card and the article comes out in a default voice.
+
+## Usage
+
 ```bash
-crypto-research "Bitcoin ETF inflows"
+crypto-research "<your query>" [options]
 ```
 
-### Command Line Arguments
+### Command-line arguments
 
 | Argument | Description |
 |----------|-------------|
-| `--test` | Run in test mode (limited processing) |
-| `--search` | Run in search mode (no outline/article generation) |
-| `--youtube` | Search YouTube content only |
-| `--substack` | Search Substacks content only |
-| `--thesis "your thesis"` | Specify research focus direction |
-| `--max-age N` | Only include content newer than N days |
+| `<query>` | The research topic, in quotes |
+| `--test` | Test mode: Haiku for everything, stops analyzer after finding 2 High/Medium articles, walks at most 30 substacks. ~5-10 min. Mutually exclusive with `--search`. |
+| `--search` | Search mode: discovery + analyzer + research summary only; no outline or article. Mutually exclusive with `--test`. |
+| `--substack` | Substack only (skip YouTube) |
+| `--youtube` | YouTube only (skip Substack) |
+| `--thesis "..."` | Provide a thesis direction. Analyzer scores articles by usefulness to the thesis instead of just topic match. |
+| `--max-age N` | Only consider articles/videos from the last N days. Strongly recommended (e.g. `--max-age 30`) — without it the system walks years of archived content. |
+| `--parallel N` | Currently scaffolded but not wired through analyzer; defaults to 1. |
 
-### Operational Modes
+### Examples
 
-1. **Full Research Mode** (default)
-   - Complete workflow from content discovery to article generation
-   - Includes all analysis, outline creation, and article writing steps
-
-2. **Search-Only Mode** (`--search`)
-   - Performs content discovery and analysis
-   - Stops before outline and article generation
-   - Useful for preliminary research or content discovery
-
-3. **Test Mode** (`--test`)
-   - Limits processing to a small subset of sources
-   - Stops after finding a few relevant items per source
-   - Useful for quickly validating research queries
-
-## Research Workflow
-
-### Content Discovery Phase
-
-1. **Query Analysis**: The Coordinator Agent analyzes your research query
-2. **Search Planning**: Essential search terms and strategies are determined
-3. **Substack Search**: If enabled, searches through Substack newsletters
-   - Database lookup to identify relevant Substacks
-   - Article retrieval from identified sources
-   - Keyword pre-filtering to focus on relevant content
-4. **YouTube Search**: If enabled, searches through YouTube content
-   - Channel and video discovery based on relevance
-   - Transcript retrieval for in-depth analysis
-   - Video content summarization with key points
-5. **User Content Processing**: Integration of your provided materials
-   - Analysis of text, PDF, CSV files you provide
-   - Extraction of key insights from your materials
-
-### Analysis and Synthesis Phase
-
-1. **Content Analysis**: All collected materials are analyzed for relevance
-   - Relevance scoring (High/Medium/Low)
-   - Key insight extraction
-   - Relationship identification between content pieces
-2. **Research Organization**: Content is categorized and structured
-   - Grouping by subtopics and themes
-   - Prioritization based on relevance and quality
-3. **Outline Generation**: A comprehensive research outline is created
-   - Main sections and subsections identification
-   - Source attribution for key points
-   - Logical flow structure for the research
-
-## Article Generation
-
-### Writing Style Personalization
-
-The system learns your writing style and embeds it in every section it writes and revises:
-
-1. **Style Sample Collection**:
-   - Place writing samples in `input/writing_samples/` directory
-   - Supports plain text (.txt) and Word documents (.docx)
-   - Add multiple samples for better style learning
-
-2. **Writing Instructions**:
-   - Edit `input/writing_instructions.txt` to specify preferences
-   - Define tone, structure, terminology preferences
-   - Set specific stylistic guidelines
-
-3. **Structured Style Card**: The Style Learning Agent generates a JSON style card capturing:
-   - Tone and personality characteristics
-   - Sentence structure patterns
-   - Vocabulary to use and avoid (word lists)
-   - Paragraph structure conventions
-   - Characteristic transition phrases
-   - Verbatim example excerpts from your writing
-
-   The style card is saved to `output/[query]/style_card.json` and embedded directly in the article writer's system prompt for every generation and revision call.
-
-4. **Stateful Conversation**: The Article Writer maintains a single conversation thread for the entire article. Each section and revision is added to the same thread, so the model always has full context of what it previously wrote — preventing style drift across sections and on revision.
-
-### Interactive Feedback Loop
-
-The system enables section-by-section feedback and revision:
-
-1. **Section Review**: After each section is generated, you review it
-2. **Feedback Options**:
-   - Accept: Move to the next section
-   - Revise: Provide specific revision instructions
-   - Edit: Make direct changes to the file
-3. **Implementation**: The system applies your feedback
-4. **Iteration**: The process continues until the article is complete
-
-Example feedback interaction:
-```
-[FEEDBACK] Section 'Introduction' has been written.
-Please review it in the article file: output/your_query/article.md
-
-Options:
-  1. Type 'accept' to proceed to the next section
-  2. Type 'revise' followed by specific instructions
-  3. Edit the file directly and then type 'edited'
-```
-
-## User Content Integration
-
-### Supported File Types
-
-You can integrate your own materials during research:
-
-- **Text Files**: Plain text content (.txt)
-- **Word Documents**: Microsoft Word files (.docx)
-- **PDF Files**: Portable Document Format (.pdf)
-- **CSV Files**: Tabular data in comma-separated format (.csv)
-- **Tweet Collections**: Lists of Twitter/X URLs
-
-The system will automatically process and analyze these materials based on file type.
-
-### Tweet Integration
-
-You can include tweet content in your research:
-
-1. Create a file named `tweets.txt` in the user content directory
-2. Add one tweet URL per line (Twitter/X URLs)
-3. The system will extract the content of each tweet
-4. Extracted tweets are saved and integrated into the research
-
-Example tweets.txt file:
-```
-https://twitter.com/VitalikButerin/status/1822742098520416625
-https://twitter.com/haydenzadams/status/1910816676628545930
-```
-
-## Output Files
-
-The system generates these output files in a query-specific directory:
-
-1. **Research Summary** (`research_results.md`)
-   - Analyzed content from all sources
-   - Relevance scoring and key insights
-
-2. **Research Outline** (`outline.md`)
-   - Structured outline incorporating all findings
-   - Section and subsection organization
-
-3. **Style Card** (`style_card.json`)
-   - Structured JSON capturing your writing style
-   - Embedded in every article generation and revision call
-
-4. **Article** (`article.md`)
-   - Complete, publication-ready article
-   - Written in your personal style
-
-5. **Word Document** (`article.docx`)
-   - Microsoft Word version of the article (via CloudConvert)
-
-6. **Agent Log** (`output/logs/agent.log`)
-   - Rotating log file with debug-level output from all agents
-
-7. **Tweet Content** (in `tweets/` subdirectory)
-   - Individual files containing extracted tweets
-
-## Usage Examples
-
-**Test mode with YouTube only:**
+**Quick test (recommended first run):**
 ```bash
-crypto-research "Ethereum Layer 2 scaling" --test --youtube
+crypto-research "Bitcoin ETF" --test --substack --max-age 30
 ```
 
-**Search mode with Substacks only:**
+**Full Opus run with thesis:**
 ```bash
-crypto-research "DeFi yield farming" --search --substack
+crypto-research "DeFi liquidity fragmentation" --substack --max-age 30 \
+  --thesis "Cross-chain bridges have made liquidity fragmentation worse, not better, by enabling silent capital migration."
 ```
 
-**Full research with thesis direction:**
+**Discovery only (no article generation):**
 ```bash
-crypto-research "NFT market trends" --thesis "Focus on the relationship between NFT sales and overall crypto market conditions"
+crypto-research "Crypto regulation" --search --max-age 14
 ```
 
-**Content age filtering:**
+**YouTube only with thesis:**
 ```bash
-crypto-research "Crypto regulations" --max-age 30
+crypto-research "Solana scaling" --youtube --max-age 30 --thesis "..."
 ```
+
+## How a run works
+
+```
+[Coordinator]   query  -> SearchPlan {main_topic, required_terms}
+                                                      |
+                                                      v
+[Discovery]     for each substack/channel: fetch posts → strip HTML → age-filter
+                                                      |
+                                                      v
+                pre-filter: required_terms must appear in title or text
+                                                      |
+                                                      v
+[Analyzer]      Claude rates each article High / Medium / Low against query
+                (and against thesis if provided) using paragraph-focus rubric
+                                                      |
+                                                      v
+                                  keep High and Medium only
+                                                      |
+                          ┌───────────────────────────┴───────────────────────┐
+                          v                                                   v
+                     no results                                         results found
+                          |                                                   |
+              [USER CONTENT prompt]                                  [USER CONTENT prompt]
+              "ready" or "skip"                                       "ready" or "skip"
+                          |                                                   |
+                          └───────────────────────────┬───────────────────────┘
+                                                      v
+[Synthesis]     research_results.md (if any sources) ; outline.md
+                                                      |
+                                                      v
+                                       [OUTLINE FEEDBACK] revise / accept / edited
+                                                      |
+                                                      v
+[StyleLearner]  read writing_samples/  →  style_card.json
+                                                      |
+                                                      v
+[ArticleWriter] write each section via stateful Conversation (style preserved)
+                                                      |
+                                                      v
+                                       [SECTION FEEDBACK] revise / accept / edited
+                                                      |
+                                                      v
+[DocxExport]    article.md  →  article.docx (CloudConvert)
+                                                      |
+                                                      v
+                                            Run Summary printed
+```
+
+## Interactive feedback flow
+
+After the outline is generated and after every section is written, the pipeline pauses:
+
+```
+[FEEDBACK] Section '2. Body' has been written.
+Review it: output/bitcoin_etf_2026-05-08_130550/article.md
+
+  [1] accept     proceed
+  [2] revise     give the AI revision instructions
+  [3] edited     I edited the file directly
+>
+```
+
+Three options:
+
+- **`accept`** (or `1`): the section is accepted as-is; pipeline moves on.
+- **`revise <instructions>`** (or `2 <instructions>`): the AI rewrites this section based on your instructions. The revised version replaces the original in the file. You can revise multiple times in a row.
+- **`edited`** (or `3`): you (the user) edited the file directly in your editor, then chose this. The pipeline re-reads the section from disk and persists your manual edits — they will survive any later revisions on other sections.
+
+Closing stdin (Ctrl+D / pipe / EOF) at any prompt is treated as `accept` — useful for non-interactive runs in CI.
+
+## Strict relevance scoring
+
+A weak prompt produces useless filtering — articles that *mention* the topic get rated High. The Analyzer prompt is intentionally strict: Claude is asked to count paragraphs focused on the topic vs. total paragraphs, then apply explicit thresholds:
+
+**No thesis provided:**
+- **HIGH**: article is primarily about the topic. Topic in title and/or developed across ≥4 paragraphs (typically ≥40% of the body).
+- **MEDIUM**: topic is a substantive recurring thread (2-3 dedicated paragraphs, or one of several major themes).
+- **LOW**: topic mentioned in passing — single paragraph, supporting example, list item.
+- Default to **LOW when uncertain.**
+
+**Thesis provided:**
+- **HIGH**: article directly tests, supports, contradicts, or analyzes the thesis. A researcher would cite it.
+- **MEDIUM**: article touches on related dynamics that inform the thesis without being directly about it.
+- **LOW**: article is largely unrelated to the thesis, even if it mentions the topic.
+- Default to **LOW when uncertain.**
+
+Only `High` and `Medium` items make it past discovery into synthesis. With this rubric, a typical run rejects 80%+ of pre-filtered candidates — which is the point.
+
+## Writing style personalization
+
+The `StyleLearner` reads everything in `input/writing_samples/` once per run and asks Claude to extract a style card capturing:
+
+- **Tone** — descriptive paragraph
+- **Sentence patterns** — typical structures (punchy openers, compound sentences, em-dash asides, etc.)
+- **Vocabulary preferred** — terms specific to your writing (e.g. *flywheel*, *mindshare*, *TGE*)
+- **Vocabulary avoided** — generic AI-cliché phrases (*"This isn't just X, it's Y"*, *"At its core"*, *"revolutionary"*)
+- **Paragraph structure** — how you build paragraphs
+- **Section openings** — your typical opening device
+- **Transitions** — your characteristic phrases
+- **Example excerpts** — 3-5 verbatim snippets from your writing
+
+The card is saved to `output/<run>/style_card.json` and embedded in the article writer's system prompt for every generation and revision call. The article writer also maintains a single conversation thread across all sections (`--resume` session ID), so the model has full context of what it previously wrote and the style remains consistent.
+
+If `input/writing_samples/` is empty, the StyleLearner skips the LLM call entirely and uses a generic fallback card (`StyleCard.fallback()`).
+
+## User content integration
+
+When the pipeline is ready for synthesis, it prompts:
+
+```
+[USER CONTENT] Add files to user_content/, then 'ready', or 'skip' to continue without.
+>
+```
+
+The output directory was created at the start of the run (`output/<slug>_<timestamp>/`). If you want to inject your own materials, drop them into `<that-dir>/user_content/` while the prompt is showing, then type `ready`. Supported types:
+
+- **Text files** (`.txt`, `.md`) — up to 1 MB
+- **PDF files** (`.pdf`) — up to 10 MB, parsed via `pdfplumber`
+- **CSV files** (`.csv`) — up to 5 MB, treated as raw text data
+
+The Analyzer extracts insights from each file and the OutlineWriter integrates them into the outline alongside the discovered sources. User content is given priority in the synthesis — your notes drive the article structure when present.
+
+For tweets, place a `tweets.txt` file with one URL per line in the user-content directory. The pipeline can extract tweet text via Playwright (handled separately by `TweetExtractor`).
+
+## Output files
+
+Each run creates a timestamped directory under `output/`:
+
+```
+output/<slug>_<YYYY-MM-DD_HHMMSS>/
+├── research_results.md   # Summary of analyzed Substack/YouTube sources (only if any passed analyzer)
+├── research_outline.md   # The outline driving the article
+├── style_card.json       # Style card extracted from writing_samples/
+├── article.md            # Final article in Markdown
+├── article.docx          # Same article exported via CloudConvert
+└── user_content/         # Your inputs from the run (if any)
+```
+
+Plus a global rotating log at `output/logs/agent.log` (DEBUG-level, all runs).
+
+## System Architecture
+
+The codebase lives under `src/crypto_research_agent/` and is organized in layers.
+
+### Real Agents (`agents/`)
+
+1. **Coordinator** — plans search terms from the query
+2. **Analyzer** — strict relevance scoring per article (paragraph-focus rubric, thesis-aware); skip-on-error per-article fault isolation
+3. **Summarizer** — builds the markdown research summary
+4. **StyleLearner** — extracts the StyleCard from writing samples
+5. **OutlineWriter** — generates and revises the outline
+6. **ArticleWriter** — writes sections one at a time via a stateful Conversation; strips LLM preamble before persisting
+
+### Services (`services/`)
+
+- **SubstackService** — discovers + fetches posts; strips HTML before storing
+- **YouTubeService** — channel discovery → playlist videos → Supadata transcripts
+- **DocxExporter** — CloudConvert lifecycle for Markdown → DOCX
+- **TweetExtractor** — Playwright-driven tweet text extraction
+- **UserContentService** — txt/md/pdf/csv ingestion with size limits
+
+### Pipeline Stages (`pipeline/`)
+
+- **DiscoveryStage** — runs sources + pre-filter + Analyzer
+- **SynthesisStage** — saves summary, generates outline, drives outline review
+- **WritingStage** — persists style card, drives section-by-section writing + section review
+- **PipelineRunner** — top-level orchestrator, owns the LLMRouter
+
+### LLM layer (`llm/`)
+
+- **ClaudeCodeBackend** — `claude -p` subprocess wrapper with subscription billing, env-var scrub, transient-error retry
+- **LLMRouter** — single-backend wrapper (subscription-only mode)
+- **Conversation** — multi-turn wrapper using `--resume` session IDs
+- **AnthropicAPIBackend** — present in code but **not wired into production**; left in case someone explicitly opts in to API mode
+
+### Utilities (`utils/`)
+
+- **logger** — rotating file output + console
+- **token_utils** — tiktoken-based truncation at sentence boundaries
+- **filters** — required-term + English-language pre-filters
+- **html** — BeautifulSoup-based HTML → plain text
+- **paths** — slug sanitization + timestamped output dir
+- **outline_parser** — Markdown → `{title, content}` sections
+- **csv_loader** — typed Substack/YouTube CSV loaders
+
+### AI Services Integration
+
+- **Claude (subscription via `claude -p`)** — every LLM call
+  - `claude-haiku-4-5-20251001` for `--test` mode and "fast" roles (Coordinator, Analyzer, Summarizer)
+  - `claude-opus-4-7` for "premium" roles (StyleLearner, OutlineWriter, ArticleWriter) in non-test runs
+- **Supadata API** — YouTube transcripts
+- **CloudConvert API** — Markdown → DOCX
+- **YouTube Data API** — channel/video discovery
 
 ## Troubleshooting
 
-- **`claude` CLI not found**: Install [Claude Code](https://claude.com/claude-code) and run `claude setup-token`. Verify with `claude -p "ping"`
-- **Subscription quota exhausted mid-run**: The pipeline will prompt you to continue via the Anthropic API (Opus/Sonnet) if `ANTHROPIC_API_KEY` is set, or abort
-- **External API key issues**: Ensure `SUPADATA_API_KEY`, `CLOUDCONVERT_API_KEY`, `YOUTUBE_API_KEY` are set in `.env`
-- **Content Database Problems**: Verify `Substacks.csv` and `YouTubes.csv` are properly formatted
-- **Style Learning Failures**: Check that writing samples are in `input/writing_samples/` and are .txt or .docx
-- **Long Articles**: For articles with many sections, the stateful conversation grows with each section; if you hit context limits, reduce the number of outline sections
-- **Log Inspection**: Check `output/logs/agent.log` for detailed debug output
+### Authentication
 
-If you encounter persistent issues, check the console output for specific error messages or review the project documentation for updates.
+- **`AuthMissing: Claude Code CLI not found on PATH`**
+  Install [Claude Code](https://claude.com/claude-code), confirm `claude -p "ping"` works in your shell, then retry.
+
+- **Pipeline succeeds but I'm being charged API credits**
+  `ANTHROPIC_API_KEY` is set somewhere. Check `[Environment]::GetEnvironmentVariable("ANTHROPIC_API_KEY", "User")` and `"Machine"`. Both should be empty. Also check `.env`. After clearing, open a new PowerShell window.
+
+- **`AuthMissing` after `claude setup-token` succeeded**
+  On Windows, `claude setup-token` does not auto-store the token in keychain. You must set `CLAUDE_CODE_OAUTH_TOKEN` as a Windows User-level env var (or in `.env`). Then open a new PowerShell window.
+
+### Discovery / sources
+
+- **Most substacks return 0 articles after age filter**
+  Expected with `--max-age 30` if many newsletters publish less than monthly. Run `python scripts/check_substacks.py` to prune dead URLs from your CSV.
+
+- **`Failed to fetch posts from <url>: 404`**
+  Substack publication is gone. The audit script will mark these for removal.
+
+- **`Failed to fetch posts from <url>: 403`**
+  Private/paid Substack — accessible only with a paid subscription. The audit script moves these to the bottom of the CSV.
+
+### Analysis / writing
+
+- **Every article scored Low**
+  Either: (a) the strict prompt is doing its job — your topic is too broad / niche / off-cycle; try a narrower query or shorter `--max-age`; (b) you're using `--test` mode and Haiku is being conservative — try without `--test` once auth is verified.
+
+- **Style card came out as fallback**
+  No writing samples in `input/writing_samples/` — drop in 1-3 `.docx` or `.txt` files. Or in test mode the LLM produced non-JSON; it's logged as a warning with the raw response prefix.
+
+- **Article voice doesn't match my samples**
+  Check `output/<run>/style_card.json` — if `tone` is `"analytical and informative"` and `example_excerpts` is empty, that's the fallback. Add more diverse samples and rerun. The article writer can only match what the StyleLearner extracted.
+
+### Long runs
+
+- **Run dies mid-way with a single LLM call failing**
+  Should not happen as of recent fixes — the Analyzer skips per-article failures, the LLM backend retries transient errors (529/503/timeout/Windows hiccups). If it still happens, check `output/logs/agent.log` for the full traceback and file an issue.
+
+- **Conversation context fills up**
+  Article writer uses one stateful conversation per article. With many sections you may approach the model's context window. Reduce the number of outline sections via the outline-revise prompt.
+
+### General
+
+- **Output ends up in the wrong directory**
+  `OUTPUT_DIR` is resolved relative to the package install location. With editable install (`pipx install -e` or `pip install -e`), runs land in `<repo>/output/`.
+
+- **Inspecting a problematic run**
+  Each run leaves its full state in `output/<slug>_<timestamp>/`. Plus the global `output/logs/agent.log` has DEBUG-level history of every run with timestamps.
+
+If you encounter persistent issues, check the console output for specific error messages, then `output/logs/agent.log` for a full traceback.
