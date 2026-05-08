@@ -15,7 +15,9 @@ from ..utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-QUOTA_PATTERNS = re.compile(r"(usage limit|quota exceeded|rate limit)", re.IGNORECASE)
+QUOTA_PATTERNS = re.compile(
+    r"(usage limit|quota exceeded|rate limit|credit balance)", re.IGNORECASE,
+)
 AUTH_PATTERNS = re.compile(r"(not authenticated|setup-token|unauthorized)", re.IGNORECASE)
 # Anthropic infra is sometimes capacity-constrained — these are RETRYABLE.
 # claude -p reports them as JSON `is_error: true` with a result message like
@@ -180,11 +182,11 @@ class ClaudeCodeBackend:
             "--tools", "",
             "--model", model,
         ]
-        # When primary is Opus and Anthropic infra is over capacity, claude -p
-        # supports auto-fallback to a cheaper model rather than failing the
-        # whole call. We point Opus at Sonnet so a 529 doesn't break the run.
-        if model.startswith("claude-opus"):
-            cmd.extend(["--fallback-model", "claude-sonnet-4-6"])
+        # NOTE: do NOT add --fallback-model — claude -p routes the fallback
+        # call through the Anthropic API (not the subscription), so without
+        # API credit it returns "Credit balance is too low" and crashes.
+        # Overload resilience comes from our TransientError retry loop instead,
+        # which retries the same model on subscription billing.
         if sys_prompt_file and not resume_session:
             cmd.extend(["--append-system-prompt-file", sys_prompt_file])
         if resume_session:

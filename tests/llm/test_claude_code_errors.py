@@ -117,9 +117,11 @@ def test_503_temporarily_unavailable_classified_as_transient():
             backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
 
 
-def test_opus_model_includes_sonnet_fallback_flag():
-    """Opus calls get --fallback-model claude-sonnet-4-6 so claude -p can
-    auto-failover to Sonnet when Opus is over capacity."""
+def test_no_fallback_model_flag_used():
+    """--fallback-model must NOT be added: it routes via the Anthropic API
+    (not the subscription), and surprises users without API credit with
+    'Credit balance is too low'. Overload resilience comes from the retry
+    loop instead, which stays on the subscription."""
     backend = ClaudeCodeBackend()
     ok = json.dumps({
         "result": "ok", "session_id": "s", "total_cost_usd": 0.0,
@@ -128,12 +130,26 @@ def test_opus_model_includes_sonnet_fallback_flag():
     with patch("subprocess.run", return_value=_mock_run(stdout=ok)) as mock_run:
         backend.complete(prompt="x", model="claude-opus-4-7")
     args = mock_run.call_args.args[0]
-    assert "--fallback-model" in args
-    assert args[args.index("--fallback-model") + 1] == "claude-sonnet-4-6"
+    assert "--fallback-model" not in args
 
 
-def test_haiku_model_skips_fallback_flag():
-    """Haiku is already lightweight — no fallback flag needed."""
+def test_credit_balance_classified_as_quota_exceeded():
+    """When claude -p routes through the API (e.g. via --fallback-model in
+    older builds, or when we accidentally trigger API), 'Credit balance is
+    too low' must be QuotaExceeded so the LLMRouter can offer the
+    Opus/Sonnet/Abort prompt instead of hard-crashing."""
+    backend = ClaudeCodeBackend(max_retries=0)
+    body = json.dumps({
+        "is_error": True,
+        "result": "Credit balance is too low",
+    })
+    with patch("subprocess.run", return_value=_mock_run(stdout=body, returncode=0)):
+        with pytest.raises(QuotaExceeded, match="Credit balance|quota"):
+            backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
+
+
+def test_haiku_model_no_fallback_flag():
+    """Haiku also gets no --fallback-model (same reason as Opus — API routing)."""
     backend = ClaudeCodeBackend()
     ok = json.dumps({
         "result": "ok", "session_id": "s", "total_cost_usd": 0.0,
