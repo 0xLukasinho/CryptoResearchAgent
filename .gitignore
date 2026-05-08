@@ -36,6 +36,8 @@ input/Substacks.csv  # Explicitly exclude Substacks.csv
 input/YouTubes.csv  # Explicitly exclude YouTubes.csv
 # Backup copies of the curated Substack list (same data as Substacks.csv)
 input/Substacks.csv.bak*
+# QA harness backup created by scripts/qa_full_run.py
+input/Substacks.csv.qa-backup
 # XLSX review export (same data as Substacks.csv)
 input/Substacks_review.xlsx
 

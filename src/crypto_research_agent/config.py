@@ -18,8 +18,10 @@ CLAUDE_FAST_MODEL = "claude-haiku-4-5-20251001"
 CLAUDE_PREMIUM_MODEL = "claude-opus-4-7"
 CLAUDE_SONNET_MODEL = "claude-sonnet-4-6"
 
-# External API keys (for fallback / non-Claude services)
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# External API keys for non-Claude services. NOTE: ANTHROPIC_API_KEY is
+# intentionally NOT loaded here — see ClaudeCodeBackend's env-scrub for the
+# rationale. Loading it would risk routing claude -p calls through the
+# Anthropic API instead of the Claude Max subscription.
 SUPADATA_API_KEY = os.environ.get("SUPADATA_API_KEY", "")
 CLOUDCONVERT_API_KEY = os.environ.get("CLOUDCONVERT_API_KEY", "")
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")

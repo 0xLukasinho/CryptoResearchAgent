@@ -8,14 +8,13 @@ from ..agents.outline_writer import OutlineWriter
 from ..agents.style_learner import StyleLearner
 from ..agents.summarizer import Summarizer
 from ..config import (
-    ANTHROPIC_API_KEY, CLOUDCONVERT_API_KEY, SUBSTACK_CSV, SUPADATA_API_KEY,
+    CLOUDCONVERT_API_KEY, SUBSTACK_CSV, SUPADATA_API_KEY,
     WRITING_INSTRUCTIONS_FILE, WRITING_SAMPLES_DIR, YOUTUBE_API_KEY, YOUTUBE_CSV,
     get_model_for_role,
 )
 from ..feedback.outline_review import OutlineReview
 from ..feedback.prompts import safe_input
 from ..feedback.section_review import SectionReview
-from ..llm.api_backend import AnthropicAPIBackend
 from ..llm.claude_code import ClaudeCodeBackend
 from ..llm.conversation import Conversation
 from ..llm.router import LLMRouter
@@ -104,32 +103,14 @@ class PipelineRunner:
     # ---- Builder methods (extracted for test isolation) ----
 
     def _build_router(self) -> LLMRouter:
+        # Subscription-only mode: no API fallback. The Anthropic API path was
+        # removed because there is no reliable runtime signal that distinguishes
+        # subscription-billed vs API-billed calls in claude -p output, and the
+        # presence of ANTHROPIC_API_KEY in env (loaded from .env) silently
+        # routes claude -p through the API. To guarantee subscription billing,
+        # we no longer load ANTHROPIC_API_KEY at all and don't wire a fallback.
         primary = ClaudeCodeBackend()
-        router = LLMRouter(primary=primary)
-        router.set_fallback_factory(self._fallback_factory)
-        router.on_quota_exhausted = self._prompt_quota_exhausted
-        return router
-
-    def _fallback_factory(self, choice: str):
-        return AnthropicAPIBackend(api_key=ANTHROPIC_API_KEY)
-
-    @staticmethod
-    def _prompt_quota_exhausted() -> str:
-        print("\n[QUOTA] Your Claude Max subscription quota is exhausted.")
-        print("        Continue using the Anthropic API (pay-per-token)?")
-        print("\n  [1] Continue with Opus")
-        print("  [2] Continue with Sonnet")
-        print("  [3] Abort\n")
-        while True:
-            # EOF (non-interactive stdin) → abort to avoid an infinite retry loop
-            choice = safe_input("> ", on_eof="3").strip()
-            if choice == "1":
-                return "opus"
-            if choice == "2":
-                return "sonnet"
-            if choice == "3":
-                return "abort"
-            print("Invalid. Pick 1/2/3.")
+        return LLMRouter(primary=primary)
 
     def _build_coordinator(self, ctx, router):
         return Coordinator(router, model=get_model_for_role("fast", test_mode=ctx.test_mode))
