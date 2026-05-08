@@ -121,6 +121,18 @@ class ClaudeCodeBackend:
                     timeout=self._timeout, check=False,
                 )
             except FileNotFoundError as e:
+                # We resolved + cached the claude path upfront via shutil.which.
+                # A FileNotFoundError from subprocess.run after that is almost
+                # always a transient Windows process-creation hiccup (antivirus
+                # interference, file lock, momentary EBUSY on the .cmd shim) —
+                # NOT a real install/auth issue. Classify as TransientError so
+                # the retry loop kicks in instead of aborting the whole pipeline.
+                if self._resolved_claude is not None:
+                    raise TransientError(
+                        f"subprocess.run raised FileNotFoundError despite "
+                        f"resolved claude path {self._resolved_claude!r}: {e}. "
+                        "Likely a transient Windows process-creation hiccup."
+                    ) from e
                 raise AuthMissing(
                     "Claude Code CLI not found on PATH. Install from "
                     "https://claude.com/download and run `claude setup-token`."

@@ -60,10 +60,26 @@ def test_auth_missing_detected():
 
 
 def test_claude_cli_not_on_path_raises_auth_missing():
+    """Real 'CLI not installed' case: shutil.which returns None upfront."""
     backend = ClaudeCodeBackend()
-    with patch("subprocess.run", side_effect=FileNotFoundError("claude not found")):
+    with patch("crypto_research_agent.llm.claude_code.shutil.which",
+               return_value=None):
         with pytest.raises(AuthMissing, match="Claude Code"):
             backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
+
+
+def test_subprocess_filenotfound_after_resolution_is_transient():
+    """If shutil.which resolved the path successfully but subprocess.run later
+    raises FileNotFoundError, that's a transient Windows process-creation
+    hiccup (antivirus, file lock, etc.) — not an install/auth issue. Must be
+    retryable, not fatal."""
+    backend = ClaudeCodeBackend(max_retries=0)  # don't actually retry/wait
+    with patch("crypto_research_agent.llm.claude_code.shutil.which",
+               return_value="C:/path/to/claude.cmd"):
+        with patch("subprocess.run",
+                   side_effect=FileNotFoundError("[WinError 2]")):
+            with pytest.raises(TransientError, match="transient"):
+                backend.complete(prompt="x", model="claude-haiku-4-5-20251001")
 
 
 def test_timeout_raises_claude_code_error():
