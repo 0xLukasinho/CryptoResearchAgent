@@ -8,6 +8,7 @@ Covers what the unit tests miss: the integration of SectionReview's revise-loop
 with ArticleWriter's accept_revision file-rewrite, including multiple
 revisions on the same section.
 """
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from crypto_research_agent.agents.article_writer import ArticleWriter
@@ -153,6 +154,94 @@ def test_writing_stage_e2e_accept_revise_edited_paths(tmp_path, monkeypatch):
     # 2 revise prompts. We don't assert on their text content (would be brittle),
     # only the count.
     assert len(fake_conv.received_prompts) == 6
+
+
+def test_edited_section_survives_later_revision(tmp_path, monkeypatch):
+    """REGRESSION: a section marked 'edited' must keep the user's manual edits
+    even if a later section gets revised (which triggers a full file rewrite
+    from _accepted). Before the fix, the LLM's content was kept in _accepted
+    after 'edited', so a later accept_revision overwrote the user's edits.
+
+    Sequence:
+      1. Section 1 written by LLM
+      2. Section 2 written by LLM
+      3. Test harness manually edits section 1's body in the file
+         (simulating user editing the .md while the prompt is showing)
+      4. User types 'edited' for section 1   -> manual edit must be persisted
+      5. Section 3 written by LLM
+      6. User types 'revise' for section 3   -> triggers full file rewrite
+      7. Final file: section 1 must STILL contain the manual-edit marker
+    """
+    fake_conv = _FakeConversation([
+        "Acknowledged.",
+        "## 1. Intro\n\nLLM-written intro.",       # section 1 written
+        "## 2. Body\n\nLLM-written body.",         # section 2 written
+        "## 3. Conclusion\n\nLLM conclusion v1.",  # section 3 written
+        "## 3. Conclusion\n\nLLM conclusion v2.",  # section 3 revised
+    ])
+
+    # Track which input is current so we can mutate the article file
+    # right before the user types 'edited' on section 1.
+    article_path_holder: dict[str, object] = {}
+
+    user_inputs = iter([
+        "__edit_then_send_edited",  # sentinel -> handled in fake_input below
+        "accept",                    # section 2: accept
+        "revise sharpen the close",  # section 3: revise
+        "accept",                    # section 3: accept revision
+    ])
+
+    def fake_input(prompt=""):
+        cmd = next(user_inputs)
+        if cmd == "__edit_then_send_edited":
+            # Mutate section 1 in the file, then return 'edited'
+            path = article_path_holder["article"]
+            text = Path(path).read_text(encoding="utf-8")
+            mutated = text.replace(
+                "LLM-written intro.",
+                "LLM-written intro.\n\nUSER MANUALLY ADDED THIS PARAGRAPH.",
+            )
+            Path(path).write_text(mutated, encoding="utf-8")
+            return "edited"
+        return cmd
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    style_learner = MagicMock()
+    style_learner.get_raw_materials.return_value = {"samples": [], "instructions": ""}
+    style_learner.generate_style_card.return_value = StyleCard.fallback()
+
+    def factory(*, card, output_path):
+        article_path_holder["article"] = output_path
+        return ArticleWriter(fake_conv, output_path=output_path)
+
+    stage = WritingStage(
+        ctx=MagicMock(output_dir=tmp_path, query="X"),
+        style_learner=style_learner,
+        article_writer_factory=factory,
+        section_review=SectionReview(),
+    )
+
+    sections = [
+        {"title": "1. Intro", "content": "intro outline"},
+        {"title": "2. Body", "content": "body outline"},
+        {"title": "3. Conclusion", "content": "conclusion outline"},
+    ]
+    article_path = stage.write(
+        outline="o", sections=sections, articles=[], videos=[], user_content=[],
+        research_summary="s", user_content_only=False,
+    )
+
+    final_text = article_path.read_text(encoding="utf-8")
+    # The manual edit on section 1 must survive section 3's revise rewrite
+    assert "USER MANUALLY ADDED THIS PARAGRAPH." in final_text, (
+        "Manual edit was overwritten by accept_revision rewrite — bug regressed"
+    )
+    # Section 3's revision is the final version
+    assert "LLM conclusion v2." in final_text
+    assert "LLM conclusion v1." not in final_text
+    # All conversation responses consumed
+    assert fake_conv._queue == []
 
 
 def test_writing_stage_e2e_eof_treated_as_accept(tmp_path, monkeypatch):
