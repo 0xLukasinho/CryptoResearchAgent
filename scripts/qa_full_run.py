@@ -104,7 +104,7 @@ def drop_user_content_fixture(run_dir: Path) -> None:
     print(f"[harness] Dropped fixture user content into {target}")
 
 
-def run_cli(query: str, thesis: str, max_age: int) -> tuple[Path, int]:
+def run_cli(query: str, thesis: str, max_age: int, test_mode: bool) -> tuple[Path, int]:
     """Spawn the CLI, watch for its output dir, drop user content,
     pipe scripted inputs, return (run_dir, exit_code)."""
     if not CLI.exists():
@@ -114,6 +114,8 @@ def run_cli(query: str, thesis: str, max_age: int) -> tuple[Path, int]:
     if thesis:
         args.extend(["--thesis", thesis])
     args.extend(["--substack", "--max-age", str(max_age)])
+    if test_mode:
+        args.append("--test")
     print(f"[harness] Running: {' '.join(args)}")
 
     before = time.time()
@@ -313,11 +315,13 @@ def main() -> int:
     p.add_argument("query", help="Research query")
     p.add_argument("--thesis", default="", help="Thesis direction")
     p.add_argument("--max-age", type=int, default=30)
+    p.add_argument("--test", action="store_true",
+                   help="Pass --test to the CLI (Haiku for all calls; cheap/fast)")
     args = p.parse_args()
 
     try:
         setup_mock_csv()
-        run_dir, exit_code = run_cli(args.query, args.thesis, args.max_age)
+        run_dir, exit_code = run_cli(args.query, args.thesis, args.max_age, args.test)
         print(f"\n[harness] CLI exited with code {exit_code}")
         print(f"[harness] Run dir: {run_dir}")
     finally:

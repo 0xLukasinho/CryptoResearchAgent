@@ -116,9 +116,18 @@ class ClaudeCodeBackend:
                 resume_session=resume_session,
             )
             cmd[0] = self._resolve_executable()
+            # CRITICAL: claude -p prefers ANTHROPIC_API_KEY over OAuth/subscription
+            # when both are present — and python-dotenv loads ANTHROPIC_API_KEY
+            # from .env into our process env, so without this every call would
+            # bill against the user's API credit instead of their Claude Max
+            # subscription. Strip the key from the subprocess env to force
+            # OAuth/subscription billing. The AnthropicAPIBackend (only used as
+            # an explicit user-confirmed fallback on quota) reads it directly.
+            env = os.environ.copy()
+            env.pop("ANTHROPIC_API_KEY", None)
             try:
                 result = subprocess.run(
-                    cmd, input=prompt,
+                    cmd, input=prompt, env=env,
                     capture_output=True, text=True, encoding="utf-8",
                     timeout=self._timeout, check=False,
                 )

@@ -45,6 +45,32 @@ def test_complete_builds_command_with_required_flags():
     assert response.output_tokens == 5
 
 
+def test_subprocess_env_strips_anthropic_api_key():
+    """CRITICAL: claude -p prefers ANTHROPIC_API_KEY over OAuth when both are
+    present. Without scrubbing, every call would bill the user's API credit
+    instead of their Claude Max subscription. Verify the env passed to
+    subprocess.run does NOT contain ANTHROPIC_API_KEY even when it's in
+    the parent process env."""
+    import os
+    backend = ClaudeCodeBackend()
+    fake_stdout = {"result": "ok", "session_id": "s", "total_cost_usd": 0.0,
+                   "usage": {"input_tokens": 0, "output_tokens": 0}, "is_error": False}
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test-12345"}, clear=False):
+        with patch("subprocess.run", return_value=_mock_run(fake_stdout)) as mock_run:
+            backend.complete(prompt="hi", model="claude-haiku-4-5-20251001")
+        env_passed = mock_run.call_args.kwargs.get("env")
+        assert env_passed is not None, (
+            "subprocess.run was called without an explicit env argument — "
+            "the parent ANTHROPIC_API_KEY would leak through and route via API"
+        )
+        assert "ANTHROPIC_API_KEY" not in env_passed, (
+            "ANTHROPIC_API_KEY leaked into claude -p subprocess env — "
+            "calls would bill against API credit instead of subscription"
+        )
+        # Other env vars should still be there (subprocess needs PATH etc.)
+        assert "PATH" in env_passed or "Path" in env_passed
+
+
 def test_complete_passes_prompt_via_stdin_not_argv():
     """Prompt is piped to claude via stdin, not appended as argv positional —
     avoids Windows argv length limits + cmd.exe newline breakage."""
